@@ -87,13 +87,21 @@ class NeogenesisSystem:
         # 初始化NeogenesisPlanner及其组件
         prior_reasoner = PriorReasoner(api_key)
         
-        # 创建LLM客户端（如果有API密钥）
+        # 创建LLM客户端（智能选择最佳可用客户端）
         llm_client = None
         if api_key:
             try:
-                from .providers.impl.deepseek_client import create_llm_client
-                llm_client = create_llm_client(api_key)
-                print("✅ LLM客户端创建成功，PathGenerator将启用智能分析")
+                # 优先尝试使用LLM管理器来自动选择最佳客户端
+                from .providers.llm_manager import LLMManager
+                llm_manager = LLMManager()
+                if llm_manager.initialized and llm_manager.providers:
+                    llm_client = llm_manager
+                    print(f"✅ LLM管理器创建成功，使用提供商: {list(llm_manager.providers.keys())}")
+                else:
+                    # 回退到DeepSeek客户端
+                    from .providers.impl.deepseek_client import create_llm_client
+                    llm_client = create_llm_client(api_key)
+                    print("✅ LLM客户端创建成功（DeepSeek），PathGenerator将启用智能分析")
             except Exception as e:
                 print(f"⚠️ LLM客户端创建失败，使用离线模式: {e}")
         else:

@@ -21,17 +21,20 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from enum import Enum
 
+logger = logging.getLogger(__name__)
+
 # LLM 相关导入
 try:
-    from ..providers.llm_manager import LLMManager
-    from ..providers.impl.ollama_client import create_ollama_client, OllamaClient
-    from ..providers.llm_base import LLMConfig, LLMProvider, LLMMessage
+    from providers.llm_manager import LLMManager
+    from providers.impl.ollama_client import create_ollama_client, OllamaClient
+    from providers.llm_base import LLMConfig, LLMProvider, LLMMessage
     LLM_AVAILABLE = True
 except ImportError as e:
     logger.warning(f"LLM组件导入失败，将使用纯启发式模式: {e}")
     LLM_AVAILABLE = False
-
-logger = logging.getLogger(__name__)
+    # 定义空的类型提示
+    LLMManager = None
+    OllamaClient = None
 
 
 # ==================== 路由分类数据结构定义 ====================
@@ -133,7 +136,7 @@ class PriorReasoner:
         
         if self.enable_llm:
             try:
-                # 尝试初始化LLM能力
+                # 尝试初始化LLM能力（优先使用LLMManager，其次Gemini，最后Ollama）
                 self._init_llm_capabilities(llm_manager, ollama_config)
             except Exception as e:
                 logger.warning(f"⚠️ LLM能力初始化失败，将使用启发式模式: {e}")
@@ -150,19 +153,69 @@ class PriorReasoner:
     
     def _init_llm_capabilities(self, llm_manager: Optional[LLMManager], ollama_config: Optional[Dict[str, Any]]):
         """
-        初始化LLM能力
+        初始化LLM能力 - 优先使用Gemini 2.5 Flash
         
         Args:
             llm_manager: 外部提供的LLM管理器
-            ollama_config: Ollama配置参数
+            ollama_config: Ollama配置参数（保留向后兼容）
         """
-        # 方式1：使用外部提供的LLM管理器
+        # 方式1：使用外部提供的LLM管理器（推荐）
         if llm_manager:
             self.llm_manager = llm_manager
-            logger.debug("🔗 使用外部提供的LLM管理器")
+            logger.info("🔗 使用外部提供的LLM管理器（支持Gemini等多提供商）")
             return
         
-        # 方式2：创建专用的Ollama客户端
+        # 方式2：尝试创建内置LLM管理器（优先Gemini）
+        try:
+            self.llm_manager = LLMManager()
+            if self.llm_manager.initialized:
+                logger.info("🚀 内置LLM管理器初始化成功，优先使用Gemini 2.5 Flash")
+                return
+        except Exception as e:
+            logger.warning(f"⚠️ 内置LLM管理器创建失败: {e}")
+        
+        # 方式3：直接尝试创建Gemini客户端
+        try:
+            import os
+            gemini_api_key = os.getenv("GEMINI_API_KEY", "")
+            if gemini_api_key:
+                from ..providers.impl.gemini_client import create_gemini_client
+                gemini_client = create_gemini_client(
+                    api_key=gemini_api_key,
+                    model="gemini-2.0-flash-exp",
+                    temperature=0.1,  # 分类任务需要确定性
+                    max_tokens=1000   # 快速响应
+                )
+                
+                # 包装为简单的管理器接口
+                class SimpleGeminiManager:
+                    def __init__(self, client):
+                        self.client = client
+                        self.initialized = True
+                    
+                    def call_api(self, prompt, system_message=None, **kwargs):
+                        messages = []
+                        if system_message:
+                            messages.append({"role": "system", "content": system_message})
+                        messages.append({"role": "user", "content": prompt})
+                        
+                        from ..providers.llm_base import LLMMessage
+                        llm_messages = [LLMMessage(role=msg["role"], content=msg["content"]) for msg in messages]
+                        response = self.client.chat_completion(llm_messages, **kwargs)
+                        
+                        if response.success:
+                            return response.content
+                        else:
+                            raise Exception(response.error_message)
+                
+                self.llm_manager = SimpleGeminiManager(gemini_client)
+                logger.info("✅ 直接创建Gemini客户端成功，用于快速任务分析")
+                return
+                
+        except Exception as e:
+            logger.warning(f"⚠️ 直接创建Gemini客户端失败: {e}")
+        
+        # 方式4：回退到Ollama（保留向后兼容）
         default_ollama_config = {
             "model_name": "deepseek-r1:7b",  # 使用已安装的deepseek-r1:7b模型进行快速分类
             "base_url": "http://localhost:11434",
@@ -178,7 +231,7 @@ class PriorReasoner:
         try:
             # 创建Ollama客户端
             self.ollama_client = create_ollama_client(**default_ollama_config)
-            logger.debug(f"🤖 Ollama客户端已创建: {default_ollama_config['model_name']}")
+            logger.info(f"🤖 回退到Ollama客户端: {default_ollama_config['model_name']}")
             
             # 快速健康检查
             if hasattr(self.ollama_client, 'validate_config'):
@@ -193,7 +246,7 @@ class PriorReasoner:
             logger.warning(f"⚠️ 创建Ollama客户端失败: {e}")
             self.ollama_client = None
             
-        # 方式3：如果Ollama不可用，创建基础的LLMManager
+        # 方式5：如果所有LLM都不可用，记录警告
         if not self.ollama_client and not self.llm_manager:
             try:
                 self.llm_manager = LLMManager()

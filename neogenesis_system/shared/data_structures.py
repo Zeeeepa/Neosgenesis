@@ -834,39 +834,453 @@ class KnowledgeProvenance:
         }
 
 
+# ========================================
+# 中心化上下文协议 (Centralized Context Protocol)
+# ========================================
+
+@dataclass
+class StageContext:
+    """
+    阶段上下文基类 - 所有阶段间传递的基础信息
+    
+    定义了各个决策阶段之间传递的通用上下文信息，
+    确保信息的完整性和一致性。
+    
+    Attributes:
+        stage_id: 阶段唯一标识符
+        stage_name: 阶段名称
+        timestamp: 阶段执行时间戳
+        user_query: 用户原始查询
+        execution_context: 执行上下文信息
+        metadata: 阶段特定的元数据
+        performance_metrics: 性能指标
+        errors: 错误信息列表
+    """
+    stage_id: str = ""
+    stage_name: str = ""
+    timestamp: float = field(default_factory=time.time)
+    user_query: str = ""
+    execution_context: Optional[Dict[str, Any]] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    performance_metrics: Dict[str, float] = field(default_factory=dict)
+    errors: List[str] = field(default_factory=list)
+    
+    def __post_init__(self):
+        """初始化后处理：生成stage_id"""
+        if not self.stage_id:
+            timestamp = int(time.time() * 1000)
+            self.stage_id = f"{self.stage_name}_{timestamp}"
+    
+    def add_error(self, error: str):
+        """添加错误信息"""
+        self.errors.append(error)
+    
+    def add_metric(self, metric_name: str, value: float):
+        """添加性能指标"""
+        self.performance_metrics[metric_name] = value
+    
+    @property
+    def has_errors(self) -> bool:
+        """判断是否有错误"""
+        return len(self.errors) > 0
+    
+    @property
+    def execution_time(self) -> Optional[float]:
+        """获取执行时间"""
+        return self.performance_metrics.get("execution_time")
+
+
+@dataclass
+class ThinkingSeedContext(StageContext):
+    """
+    思维种子阶段上下文 - 阶段一输出
+    
+    包含思维种子生成阶段的完整结果，为后续阶段提供基础思维起点。
+    
+    Attributes:
+        thinking_seed: 生成的思维种子
+        seed_type: 种子类型 (basic, rag_enhanced, creative)
+        generation_method: 生成方法
+        confidence_score: 种子置信度
+        source_information: 源信息（RAG增强时）
+        search_results: 搜索结果（如果使用了搜索）
+        reasoning_process: 推理过程
+        alternative_seeds: 备选种子
+    """
+    thinking_seed: str = ""
+    seed_type: str = "basic"  # basic, rag_enhanced, creative
+    generation_method: str = "prior_reasoning"
+    confidence_score: float = 0.5
+    source_information: List[Dict[str, Any]] = field(default_factory=list)
+    search_results: List[Dict[str, Any]] = field(default_factory=list)
+    reasoning_process: str = ""
+    alternative_seeds: List[str] = field(default_factory=list)
+    
+    def __post_init__(self):
+        super().__post_init__()
+        if not self.stage_name:
+            self.stage_name = "thinking_seed_generation"
+
+
+@dataclass
+class SeedVerificationContext(StageContext):
+    """
+    种子验证阶段上下文 - 阶段二输出
+    
+    包含思维种子验证的完整结果，评估种子的可行性和质量。
+    
+    Attributes:
+        verification_result: 验证结果
+        feasibility_score: 可行性评分
+        verification_method: 验证方法
+        verification_evidence: 验证证据
+        identified_risks: 识别的风险
+        improvement_suggestions: 改进建议
+        verification_sources: 验证信息源
+        cross_validation_results: 交叉验证结果
+    """
+    verification_result: bool = False
+    feasibility_score: float = 0.0
+    verification_method: str = "web_search"
+    verification_evidence: List[str] = field(default_factory=list)
+    identified_risks: List[str] = field(default_factory=list)
+    improvement_suggestions: List[str] = field(default_factory=list)
+    verification_sources: List[Dict[str, Any]] = field(default_factory=list)
+    cross_validation_results: Dict[str, Any] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        super().__post_init__()
+        if not self.stage_name:
+            self.stage_name = "seed_verification"
+
+
+@dataclass
+class PathGenerationContext(StageContext):
+    """
+    路径生成阶段上下文 - 阶段三输出
+    
+    包含多路径思维生成的完整结果，提供多样化的解决方案路径。
+    
+    Attributes:
+        generated_paths: 生成的推理路径列表
+        path_count: 路径数量
+        generation_strategy: 生成策略
+        diversity_score: 多样性评分
+        path_quality_scores: 路径质量评分
+        generation_time: 生成耗时
+        failed_generations: 失败的生成尝试
+        path_categories: 路径分类信息
+    """
+    generated_paths: List[Any] = field(default_factory=list)  # List[ReasoningPath]
+    path_count: int = 0
+    generation_strategy: str = "llm_driven"
+    diversity_score: float = 0.0
+    path_quality_scores: Dict[str, float] = field(default_factory=dict)
+    generation_time: float = 0.0
+    failed_generations: List[str] = field(default_factory=list)
+    path_categories: Dict[str, List[str]] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        super().__post_init__()
+        if not self.stage_name:
+            self.stage_name = "path_generation"
+        self.path_count = len(self.generated_paths)
+    
+    def add_path(self, path: Any):
+        """添加生成的路径"""
+        self.generated_paths.append(path)
+        self.path_count = len(self.generated_paths)
+    
+    def get_paths_by_category(self, category: str) -> List[Any]:
+        """根据类别获取路径"""
+        if category not in self.path_categories:
+            return []
+        path_ids = self.path_categories[category]
+        return [path for path in self.generated_paths if path.path_id in path_ids]
+
+
+@dataclass
+class PathVerificationContext(StageContext):
+    """
+    路径验证阶段上下文 - 阶段四输出
+    
+    包含路径验证和即时学习的完整结果，评估各路径的可行性。
+    
+    Attributes:
+        verified_paths: 验证过的路径信息
+        verification_results: 验证结果详情
+        learning_updates: 学习更新信息
+        path_rankings: 路径排名
+        verification_confidence: 验证置信度
+        rejected_paths: 被拒绝的路径
+        verification_time: 验证耗时
+        learning_feedback: 学习反馈
+    """
+    verified_paths: List[Dict[str, Any]] = field(default_factory=list)
+    verification_results: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    learning_updates: List[Dict[str, Any]] = field(default_factory=list)
+    path_rankings: List[Tuple[str, float]] = field(default_factory=list)
+    verification_confidence: Dict[str, float] = field(default_factory=dict)
+    rejected_paths: List[Dict[str, Any]] = field(default_factory=list)
+    verification_time: float = 0.0
+    learning_feedback: Dict[str, Any] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        super().__post_init__()
+        if not self.stage_name:
+            self.stage_name = "path_verification"
+    
+    def add_verification_result(self, path_id: str, result: Dict[str, Any]):
+        """添加验证结果"""
+        self.verification_results[path_id] = result
+    
+    def get_top_paths(self, n: int = 3) -> List[Tuple[str, float]]:
+        """获取排名前N的路径"""
+        return sorted(self.path_rankings, key=lambda x: x[1], reverse=True)[:n]
+
+
+@dataclass
+class MABDecisionContext(StageContext):
+    """
+    MAB决策阶段上下文 - 阶段五输出
+    
+    包含多臂老虎机最终决策的完整结果，选择最优路径。
+    
+    Attributes:
+        selected_path: 最终选择的路径
+        selection_algorithm: 使用的MAB算法
+        selection_confidence: 选择置信度
+        algorithm_comparison: 算法比较结果
+        exploration_exploitation_balance: 探索利用平衡
+        golden_template_used: 是否使用了黄金模板
+        aha_moment_triggered: 是否触发了Aha时刻
+        decision_reasoning: 决策推理过程
+        alternative_choices: 备选选择
+        mab_statistics: MAB统计信息
+    """
+    selected_path: Optional[Any] = None  # ReasoningPath
+    selection_algorithm: str = ""
+    selection_confidence: float = 0.0
+    algorithm_comparison: Dict[str, float] = field(default_factory=dict)
+    exploration_exploitation_balance: Dict[str, float] = field(default_factory=dict)
+    golden_template_used: bool = False
+    aha_moment_triggered: bool = False
+    decision_reasoning: str = ""
+    alternative_choices: List[Tuple[Any, float]] = field(default_factory=list)
+    mab_statistics: Dict[str, Any] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        super().__post_init__()
+        if not self.stage_name:
+            self.stage_name = "mab_decision"
+
+
 @dataclass
 class StrategyDecision:
     """
     战略决策结果 - 连接战略规划器和战术规划器的桥梁
     
-    这个数据结构包含了战略规划器的完整决策结果，
-    为战术规划器提供所需的所有上下文信息。
+    这是完整的五阶段决策流程的最终输出，包含了所有阶段的上下文信息，
+    为战术规划器提供完整的决策上下文。这个数据结构实现了真正的"上下文协议"。
     
     Attributes:
-        chosen_path: 选中的推理路径
-        thinking_seed: 思维种子
-        reasoning: 决策推理过程
+        decision_id: 决策唯一标识符
         user_query: 用户原始查询
-        available_paths: 所有可用的推理路径
-        verified_paths: 验证过的路径信息
         timestamp: 决策时间戳
         round_number: 决策轮次
-        selection_algorithm: 选择算法
-        verification_stats: 验证统计信息
-        performance_metrics: 性能指标
+        
+        # 五阶段上下文信息
+        stage1_context: 思维种子生成上下文
+        stage2_context: 种子验证上下文  
+        stage3_context: 路径生成上下文
+        stage4_context: 路径验证上下文
+        stage5_context: MAB决策上下文
+        
+        # 最终决策结果
+        chosen_path: 选中的推理路径
+        final_reasoning: 最终推理结果
+        confidence_score: 整体置信度
+        
+        # 决策质量指标
+        decision_quality_metrics: 决策质量指标
+        total_execution_time: 总执行时间
+        stage_execution_times: 各阶段执行时间
+        
+        # 扩展信息
         execution_context: 执行上下文
-        confidence_score: 置信度分数
+        metadata: 额外元数据
+        errors: 决策过程中的错误
+        warnings: 警告信息
     """
-    chosen_path: Any  # 使用Any避免循环导入，实际类型是ReasoningPath
-    thinking_seed: str
-    reasoning: str
-    user_query: str
-    available_paths: List[Any]  # List[ReasoningPath]
-    verified_paths: List[Dict[str, Any]]
-    timestamp: float
-    round_number: int
-    selection_algorithm: str
-    verification_stats: Dict[str, Any]
-    performance_metrics: Dict[str, Any]
-    execution_context: Optional[Dict[str, Any]] = None
+    decision_id: str = ""
+    user_query: str = ""
+    timestamp: float = field(default_factory=time.time)
+    round_number: int = 1
+    
+    # 五阶段上下文信息
+    stage1_context: Optional[ThinkingSeedContext] = None
+    stage2_context: Optional[SeedVerificationContext] = None
+    stage3_context: Optional[PathGenerationContext] = None
+    stage4_context: Optional[PathVerificationContext] = None
+    stage5_context: Optional[MABDecisionContext] = None
+    
+    # 最终决策结果
+    chosen_path: Optional[Any] = None  # ReasoningPath
+    final_reasoning: str = ""
     confidence_score: float = 0.5
+    
+    # 决策质量指标
+    decision_quality_metrics: Dict[str, float] = field(default_factory=dict)
+    total_execution_time: float = 0.0
+    stage_execution_times: Dict[str, float] = field(default_factory=dict)
+    
+    # 扩展信息
+    execution_context: Optional[Dict[str, Any]] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    
+    def __post_init__(self):
+        """初始化后处理：生成decision_id"""
+        if not self.decision_id:
+            timestamp = int(time.time() * 1000)
+            self.decision_id = f"strategy_decision_{timestamp}_{self.round_number}"
+    
+    def add_stage_context(self, stage_num: int, context: StageContext):
+        """添加阶段上下文"""
+        if stage_num == 1 and isinstance(context, ThinkingSeedContext):
+            self.stage1_context = context
+        elif stage_num == 2 and isinstance(context, SeedVerificationContext):
+            self.stage2_context = context
+        elif stage_num == 3 and isinstance(context, PathGenerationContext):
+            self.stage3_context = context
+        elif stage_num == 4 and isinstance(context, PathVerificationContext):
+            self.stage4_context = context
+        elif stage_num == 5 and isinstance(context, MABDecisionContext):
+            self.stage5_context = context
+        
+        # 更新阶段执行时间
+        if context.execution_time:
+            self.stage_execution_times[context.stage_name] = context.execution_time
+            self.total_execution_time = sum(self.stage_execution_times.values())
+    
+    def add_error(self, error: str):
+        """添加错误信息"""
+        self.errors.append(error)
+    
+    def add_warning(self, warning: str):
+        """添加警告信息"""
+        self.warnings.append(warning)
+    
+    def add_quality_metric(self, metric_name: str, value: float):
+        """添加决策质量指标"""
+        self.decision_quality_metrics[metric_name] = value
+    
+    @property
+    def has_errors(self) -> bool:
+        """判断是否有错误"""
+        return len(self.errors) > 0
+    
+    @property
+    def has_warnings(self) -> bool:
+        """判断是否有警告"""
+        return len(self.warnings) > 0
+    
+    @property
+    def is_complete(self) -> bool:
+        """判断决策是否完整（所有五个阶段都有上下文）"""
+        return all([
+            self.stage1_context is not None,
+            self.stage2_context is not None,
+            self.stage3_context is not None,
+            self.stage4_context is not None,
+            self.stage5_context is not None,
+            self.chosen_path is not None
+        ])
+    
+    @property
+    def thinking_seed(self) -> str:
+        """获取思维种子"""
+        if self.stage1_context:
+            return self.stage1_context.thinking_seed
+        return ""
+    
+    @property
+    def available_paths(self) -> List[Any]:
+        """获取所有可用路径"""
+        if self.stage3_context:
+            return self.stage3_context.generated_paths
+        return []
+    
+    @property
+    def verified_paths(self) -> List[Dict[str, Any]]:
+        """获取验证过的路径"""
+        if self.stage4_context:
+            return self.stage4_context.verified_paths
+        return []
+    
+    @property
+    def selection_algorithm(self) -> str:
+        """获取选择算法"""
+        if self.stage5_context:
+            return self.stage5_context.selection_algorithm
+        return ""
+    
+    @property
+    def verification_stats(self) -> Dict[str, Any]:
+        """获取验证统计信息"""
+        if self.stage4_context:
+            return {
+                "verified_count": len(self.stage4_context.verified_paths),
+                "rejected_count": len(self.stage4_context.rejected_paths),
+                "verification_time": self.stage4_context.verification_time,
+                "average_confidence": sum(self.stage4_context.verification_confidence.values()) / 
+                                   len(self.stage4_context.verification_confidence) if self.stage4_context.verification_confidence else 0.0
+            }
+        return {}
+    
+    @property
+    def performance_metrics(self) -> Dict[str, Any]:
+        """获取性能指标"""
+        return {
+            "total_execution_time": self.total_execution_time,
+            "stage_times": self.stage_execution_times.copy(),
+            "confidence_score": self.confidence_score,
+            "decision_quality": self.decision_quality_metrics.copy(),
+            "error_count": len(self.errors),
+            "warning_count": len(self.warnings),
+            "completeness": self.is_complete
+        }
+    
+    def _get_chosen_path_id(self) -> Optional[str]:
+        """安全地获取选择路径的ID"""
+        if not self.chosen_path:
+            return None
+        
+        # 处理字典格式的路径
+        if isinstance(self.chosen_path, dict):
+            return self.chosen_path.get("path_id")
+        
+        # 处理对象格式的路径
+        if hasattr(self.chosen_path, 'path_id'):
+            return self.chosen_path.path_id
+        
+        # 回退：尝试获取字符串表示
+        return str(self.chosen_path) if self.chosen_path else None
+    
+    def get_decision_summary(self) -> Dict[str, Any]:
+        """获取决策摘要"""
+        return {
+            "decision_id": self.decision_id,
+            "user_query": self.user_query[:100] + "..." if len(self.user_query) > 100 else self.user_query,
+            "timestamp": self.timestamp,
+            "round_number": self.round_number,
+            "chosen_path_id": self._get_chosen_path_id(),
+            "confidence_score": self.confidence_score,
+            "total_execution_time": self.total_execution_time,
+            "is_complete": self.is_complete,
+            "has_errors": self.has_errors,
+            "has_warnings": self.has_warnings,
+            "stage_count": sum(1 for ctx in [self.stage1_context, self.stage2_context, 
+                                           self.stage3_context, self.stage4_context, self.stage5_context] if ctx is not None)
+        }

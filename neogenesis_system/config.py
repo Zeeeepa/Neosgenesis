@@ -78,11 +78,13 @@ PROMPT_TEMPLATES = {
 4. 选项之间要互斥且覆盖主要决策空间
 5. 考虑技术实现、性能、可靠性、用户体验等多个角度
 
-📝 **输出格式** (严格按照JSON格式):
-```json
+📝 **输出要求**:
+请以JSON格式输出，确保格式严格正确，不要包含任何额外的文本或解释。
+
+**JSON结构**:
 {{
     "task_analysis": {{
-        "complexity": 0.7,  // 任务复杂度 (0.0-1.0)
+        "complexity": 0.7,
         "domain": "任务领域",
         "key_challenges": ["挑战1", "挑战2", "挑战3"]
     }},
@@ -99,7 +101,6 @@ PROMPT_TEMPLATES = {
     }},
     "reasoning": "详细说明为什么选择这些维度，每个维度解决什么问题，以及维度之间的关系"
 }}
-```
 
 💡 **设计原则**:
 - 维度名称要准确反映决策要点
@@ -160,6 +161,98 @@ PROMPT_TEMPLATES = {
 }}
 
 请基于您对自身能力的真实理解，诚实、准确地进行分析。
+""",
+
+    # Gemini优化的Prompt模板
+    "gemini_task_analysis": """
+You are an expert task analysis specialist. Analyze the following task and provide a structured assessment.
+
+**Task**: {user_query}
+**Context**: {context_info}
+
+**Analysis Requirements**:
+1. Assess task complexity (0.0-1.0 scale)
+2. Identify key challenges and requirements
+3. Determine optimal approach strategy
+4. Evaluate resource needs and constraints
+
+**Response Format**:
+Provide your analysis in valid JSON format only, with no additional text:
+
+{{
+    "complexity_score": 0.7,
+    "domain": "task_domain",
+    "key_challenges": ["challenge1", "challenge2", "challenge3"],
+    "approach_strategy": "recommended_strategy",
+    "resource_requirements": ["requirement1", "requirement2"],
+    "estimated_effort": "effort_level",
+    "success_factors": ["factor1", "factor2"],
+    "potential_risks": ["risk1", "risk2"]
+}}
+""",
+
+    "gemini_dimension_creation": """
+You are a decision framework architect. Create optimal decision dimensions for the given task.
+
+**Task**: {user_query}
+**Historical Insights**: {historical_insights}
+
+**Requirements**:
+- Create 3-6 key decision dimensions
+- Each dimension should have 2-4 mutually exclusive options
+- Options must be actionable and cover the decision space
+- Consider technical feasibility, performance, and user experience
+
+**Output only valid JSON**:
+
+{{
+    "task_analysis": {{
+        "complexity": 0.7,
+        "domain": "domain_name",
+        "key_challenges": ["challenge1", "challenge2"]
+    }},
+    "dimensions": {{
+        "dimension_1": {{
+            "option_a": "detailed description of option A with use cases",
+            "option_b": "detailed description of option B with use cases"
+        }},
+        "dimension_2": {{
+            "option_x": "detailed description of option X",
+            "option_y": "detailed description of option Y",
+            "option_z": "detailed description of option Z"
+        }}
+    }},
+    "reasoning": "explanation of dimension choices and relationships"
+}}
+""",
+
+    "gemini_path_verification": """
+You are a solution validation expert. Evaluate the feasibility and quality of the proposed reasoning path.
+
+**Task**: {user_query}
+**Proposed Path**: {reasoning_path}
+**Context**: {context}
+
+**Evaluation Criteria**:
+- Technical feasibility (0.0-1.0)
+- Implementation complexity (0.0-1.0)
+- Expected effectiveness (0.0-1.0)
+- Resource requirements
+- Potential risks and mitigation strategies
+
+**Output valid JSON only**:
+
+{{
+    "feasibility_score": 0.8,
+    "complexity_score": 0.6,
+    "effectiveness_score": 0.9,
+    "overall_rating": 0.77,
+    "strengths": ["strength1", "strength2"],
+    "weaknesses": ["weakness1", "weakness2"],
+    "risks": ["risk1", "risk2"],
+    "recommendations": ["recommendation1", "recommendation2"],
+    "implementation_notes": "specific guidance for implementation"
+}}
 """
 }
 
@@ -232,7 +325,9 @@ FEATURE_FLAGS = {
     "enable_hybrid_seed_generation": False,     # 新增：启用混合种子生成策略
     "enable_real_time_information": True,       # 新增：启用实时信息获取
     "enable_information_verification": True,    # 新增：启用信息验证
-    "enable_multi_llm_support": True           # 新增：启用多LLM支持
+    "enable_multi_llm_support": True,          # 新增：启用多LLM支持
+    "prefer_gemini_for_analysis": True,        # 新增：分析任务优先使用Gemini
+    "enable_gemini_json_mode": True            # 新增：启用Gemini JSON模式
 }
 
 # ==================== 多LLM配置系统 ====================
@@ -323,6 +418,28 @@ LLM_PROVIDERS_CONFIG = {
         "enabled": False  # 默认禁用，需要API密钥和端点
     },
     
+    "gemini": {
+        "display_name": "Google Gemini",
+        "provider_type": "gemini",
+        "api_key_env": "GEMINI_API_KEY",
+        "default_model": "gemini-2.0-flash-exp",
+        "available_models": [
+            "gemini-2.0-flash-exp", "gemini-1.5-flash", "gemini-1.5-flash-8b",
+            "gemini-1.5-pro", "gemini-1.0-pro"
+        ],
+        "base_url": "https://generativelanguage.googleapis.com",
+        "max_tokens": 8192,
+        "temperature": 0.7,
+        "timeout": (30, 120),
+        "max_retries": 3,
+        "retry_delay_base": 2.0,
+        "request_interval": 0.5,
+        "features": ["chat", "function_calling", "multimodal", "json_mode", "fast_inference"],
+        "cost_per_1k_tokens": {"input": 0.000075, "output": 0.0003},  # Gemini 2.0 Flash pricing
+        "context_window": 1048576,  # 1M tokens context window
+        "enabled": True  # 默认启用，推荐使用
+    },
+    
     "ollama": {
         "display_name": "Ollama (本地)",
         "provider_type": "ollama",
@@ -347,10 +464,10 @@ LLM_PROVIDERS_CONFIG = {
 DEFAULT_LLM_CONFIG = {
     "primary_provider": "auto",          # 主要提供商（auto=自动检测可用的提供商）
     "preferred_providers": [             # 首选提供商顺序（按优先级）
-        "deepseek", "openai", "anthropic", "ollama"
+        "gemini", "deepseek", "openai", "anthropic", "ollama"
     ],
     "fallback_providers": [              # 回退提供商（按优先级）
-        "openai", "anthropic", "ollama", "deepseek"
+        "deepseek", "openai", "anthropic", "ollama", "gemini"
     ],
     "auto_fallback": True,               # 是否自动回退
     "fallback_on_error": True,          # 错误时是否回退

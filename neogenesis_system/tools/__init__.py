@@ -35,8 +35,8 @@ from .tool_abstraction import (
     get_tool_instance
 )
 
-# 从 default_tools 导入 Tool 类和默认工具
-from .default_tools import Tool, DefaultTools
+# 从 default_tools 导入工具管理函数
+from .default_tools import get_all_default_tools, initialize_default_tools
 
 # 从 image_generation_tools 导入图像生成工具（可选导入）
 try:
@@ -85,9 +85,9 @@ __all__ = [
     "is_tool",
     "get_tool_instance",
     
-    # 默认工具和简化工具类
-    "Tool",
-    "DefaultTools"
+    # 默认工具管理函数
+    "get_all_default_tools",
+    "initialize_default_tools"
 ]
 
 # 如果图像生成工具可用，添加到__all__中

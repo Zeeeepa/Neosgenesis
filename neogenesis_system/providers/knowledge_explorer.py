@@ -30,14 +30,18 @@ try:
 except ImportError:
     WebSearchClient = None
 
-try:
-    from ..cognitive_engine.semantic_analyzer import SemanticAnalyzer, AnalysisTaskType
-except ImportError:
-    SemanticAnalyzer = None
-    AnalysisTaskType = None
-    logger.error("❌ SemanticAnalyzer 导入失败，KnowledgeExplorer将使用默认策略运行")
-
 logger = logging.getLogger(__name__)
+
+try:
+    from cognitive_engine.semantic_analyzer import SemanticAnalyzer, AnalysisTaskType
+except ImportError:
+    try:
+        # 尝试相对导入作为回退
+        from ..cognitive_engine.semantic_analyzer import SemanticAnalyzer, AnalysisTaskType
+    except ImportError:
+        SemanticAnalyzer = None
+        AnalysisTaskType = None
+        logger.warning("⚠️ SemanticAnalyzer 导入失败，KnowledgeExplorer将使用默认策略运行")
 
 
 class ExplorationStrategy(Enum):

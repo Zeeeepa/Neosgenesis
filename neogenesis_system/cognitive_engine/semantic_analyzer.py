@@ -648,12 +648,25 @@ class SemanticAnalyzer:
             # 调用LLM (这里需要实现LLM调用逻辑)
             llm_response = self._call_llm(prompt, task, **kwargs)
             
-            # 解析响应
+            # 解析响应 - 使用改进的JSON解析
             try:
-                result_data = json.loads(llm_response) if isinstance(llm_response, str) else llm_response
+                if isinstance(llm_response, str):
+                    # 使用改进的JSON解析函数
+                    from ..providers.rag_seed_generator import parse_json_response
+                    result_data = parse_json_response(llm_response)
+                    if not result_data:
+                        # 如果解析失败，尝试标准JSON解析作为回退
+                        result_data = json.loads(llm_response)
+                else:
+                    result_data = llm_response
+                    
                 confidence = result_data.get('confidence', task.confidence_threshold)
             except json.JSONDecodeError as e:
                 logger.warning(f"⚠️ JSON解析失败，使用降级处理: {e}")
+                result_data = {"raw_response": llm_response, "parse_error": str(e)}
+                confidence = 0.5
+            except Exception as e:
+                logger.warning(f"⚠️ 响应解析异常，使用降级处理: {e}")
                 result_data = {"raw_response": llm_response, "parse_error": str(e)}
                 confidence = 0.5
             

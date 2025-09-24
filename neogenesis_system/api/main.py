@@ -112,10 +112,26 @@ async def initialize_neogenesis_agent():
     try:
         logger.info("🤖 初始化 NeogenesisAgent...")
         
-        # 获取 API 密钥
-        api_key = os.getenv("DEEPSEEK_API_KEY", "")
+        # 智能获取 API 密钥（检测多种提供商）
+        api_key = ""
+        provider_used = "none"
+        
+        # 按优先级检查API密钥
+        for provider, env_var in [
+            ("Gemini", "GEMINI_API_KEY"),
+            ("DeepSeek", "DEEPSEEK_API_KEY"), 
+            ("OpenAI", "OPENAI_API_KEY"),
+            ("Anthropic", "ANTHROPIC_API_KEY")
+        ]:
+            key = os.getenv(env_var, "")
+            if key:
+                api_key = key
+                provider_used = provider
+                logger.info(f"✅ 找到 {provider} API密钥，将使用 {provider} 提供商")
+                break
+        
         if not api_key:
-            logger.warning("⚠️ 未找到 DEEPSEEK_API_KEY，使用模拟模式")
+            logger.warning("⚠️ 未找到任何LLM提供商的API密钥，使用模拟模式")
         
         # 使用工厂方法创建 NeogenesisAgent
         neogenesis_agent = AgentFactory.create_neogenesis_agent(
@@ -156,14 +172,28 @@ async def initialize_additional_components():
             try:
                 config = get_default_config() if 'get_default_config' in globals() else {}
                 
-                # 🔧 修复：创建LLM客户端以正确初始化回溯引擎
+                # 🔧 修复：创建LLM客户端以正确初始化回溯引擎（智能选择）
                 llm_client = None
-                api_key = os.getenv("DEEPSEEK_API_KEY")
+                # 智能获取API密钥（检测多种提供商）
+                api_key = ""
+                for env_var in ["GEMINI_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]:
+                    key = os.getenv(env_var, "")
+                    if key:
+                        api_key = key
+                        break
                 if api_key:
                     try:
-                        from ..providers.impl.deepseek_client import create_llm_client
-                        llm_client = create_llm_client(api_key)
-                        logger.info("✅ LLM客户端创建成功，用于认知调度器")
+                        # 优先尝试使用LLM管理器来自动选择最佳客户端
+                        from ..providers.llm_manager import LLMManager
+                        llm_manager = LLMManager()
+                        if llm_manager.initialized and llm_manager.providers:
+                            llm_client = llm_manager
+                            logger.info(f"✅ LLM管理器创建成功，用于认知调度器，提供商: {list(llm_manager.providers.keys())}")
+                        else:
+                            # 回退到DeepSeek客户端
+                            from ..providers.impl.deepseek_client import create_llm_client
+                            llm_client = create_llm_client(api_key)
+                            logger.info("✅ LLM客户端创建成功（DeepSeek），用于认知调度器")
                     except Exception as e:
                         logger.warning(f"⚠️ LLM客户端创建失败: {e}")
                 

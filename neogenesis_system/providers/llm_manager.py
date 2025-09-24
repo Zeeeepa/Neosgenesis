@@ -115,7 +115,7 @@ class LLMManager:
                 llm_config = self._create_llm_config(provider_name, provider_config, api_key)
                 
                 # 创建客户端
-                client = create_llm_client(llm_config.api_key)
+                client = self._create_provider_client(provider_name, llm_config)
                 
                 # 快速健康检查
                 if self._quick_health_check(client, provider_name):
@@ -173,6 +173,41 @@ class LLMManager:
         except Exception as e:
             logger.error(f"❌ 单一提供商初始化失败: {e}")
     
+    def _create_provider_client(self, provider_name: str, llm_config: LLMConfig) -> BaseLLMClient:
+        """创建特定提供商的客户端"""
+        try:
+            # 检查配置中的provider_type来决定使用哪个客户端
+            provider_config = LLM_PROVIDERS_CONFIG.get(provider_name, {})
+            provider_type = provider_config.get("provider_type", provider_name)
+            
+            if provider_type == "gemini_openai" or (provider_name == "gemini" and provider_type == "gemini_openai"):
+                from .impl.gemini_openai_client import GeminiOpenAIClient
+                return GeminiOpenAIClient(llm_config)
+            elif provider_name == "gemini" or provider_type == "gemini":
+                from .impl.gemini_client import GeminiClient
+                return GeminiClient(llm_config)
+            elif provider_name == "deepseek":
+                from .impl.deepseek_client import create_llm_client
+                return create_llm_client(llm_config.api_key)
+            elif provider_name == "openai":
+                from .impl.openai_client import OpenAIClient
+                return OpenAIClient(llm_config)
+            elif provider_name == "anthropic":
+                from .impl.anthropic_client import AnthropicClient
+                return AnthropicClient(llm_config)
+            elif provider_name == "ollama":
+                from .impl.ollama_client import OllamaClient
+                return OllamaClient(llm_config)
+            else:
+                # 默认使用DeepSeek客户端作为回退
+                from .impl.deepseek_client import create_llm_client
+                return create_llm_client(llm_config.api_key)
+        except ImportError as e:
+            logger.warning(f"⚠️ 无法导入{provider_name}客户端: {e}")
+            # 回退到DeepSeek
+            from .impl.deepseek_client import create_llm_client
+            return create_llm_client(llm_config.api_key)
+    
     def _create_llm_config(self, provider_name: str, provider_config: Dict, api_key: str) -> LLMConfig:
         """创建LLM配置"""
         provider_type = provider_config["provider_type"]
@@ -181,6 +216,18 @@ class LLMManager:
         # 特殊处理Azure OpenAI
         extra_params = {}
         base_url = provider_config.get("base_url")
+        
+        # 确保base_url不为None
+        if base_url is None:
+            if provider_type == "deepseek":
+                base_url = "https://api.deepseek.com"
+            elif provider_type == "gemini_openai":
+                base_url = "https://hiapi.online/v1"
+            elif provider_type == "openai":
+                base_url = "https://api.openai.com/v1"
+            else:
+                base_url = ""
+            logger.warning(f"⚠️ {provider_name}的base_url为None，使用默认值: {base_url}")
         
         if provider_type == "azure_openai":
             azure_endpoint = os.getenv(provider_config.get("azure_endpoint_env", ""), "")

@@ -30,31 +30,13 @@ except ImportError:
     from neogenesis_system.abstractions import BaseAgent, BasePlanner, BaseToolExecutor, BaseAsyncToolExecutor, BaseMemory
     from neogenesis_system.shared.data_structures import Plan, Action, Observation, ExecutionContext, AgentState
 
-# 导入战略决策数据结构（需要在data_structures.py中定义）
+# 导入战略决策数据结构
 try:
     from ..shared.data_structures import StrategyDecision
     from ..cognitive_engine.data_structures import ReasoningPath
 except ImportError:
-    # 如果还未定义StrategyDecision，使用临时定义
-    from dataclasses import dataclass
+    from neogenesis_system.shared.data_structures import StrategyDecision
     from neogenesis_system.cognitive_engine.data_structures import ReasoningPath
-    
-    @dataclass
-    class StrategyDecision:
-        """临时的战略决策数据结构"""
-        chosen_path: ReasoningPath
-        thinking_seed: str
-        reasoning: str
-        user_query: str
-        available_paths: List[ReasoningPath]
-        verified_paths: List[Dict[str, Any]]
-        timestamp: float
-        round_number: int
-        selection_algorithm: str
-        verification_stats: Dict[str, Any]
-        performance_metrics: Dict[str, Any]
-        execution_context: Optional[Dict[str, Any]] = None
-        confidence_score: float = 0.5
 
 # 导入工具系统
 from ..tools.tool_abstraction import ToolRegistry, global_tool_registry
@@ -301,14 +283,34 @@ class WorkflowPlanner(BasePlanner):
         chosen_path = strategy_decision.chosen_path
         thinking_seed = strategy_decision.thinking_seed
         
-        logger.info(f"🔄 开始策略转换: {chosen_path.path_type}")
+        # 处理新的StrategyDecision结构
+        path_type = "unknown"
+        if chosen_path:
+            if isinstance(chosen_path, dict):
+                path_type = chosen_path.get("path_type", "unknown")
+            else:
+                path_type = getattr(chosen_path, 'path_type', 'unknown')
+        
+        logger.info(f"🔄 开始策略转换: {path_type}")
         
         # 构建战术思考过程
         tactical_thought_parts = [
-            f"基于战略决策，我将采用'{chosen_path.path_type}'策略",
-            f"战略推理: {strategy_decision.reasoning}",
+            f"基于战略决策，我将采用'{path_type}'策略",
+            f"战略推理: {strategy_decision.final_reasoning}",
+            f"置信度: {strategy_decision.confidence_score:.3f}",
             f"现在转化为具体执行计划..."
         ]
+        
+        # 添加阶段信息摘要
+        if strategy_decision.is_complete:
+            tactical_thought_parts.append("✅ 完整五阶段决策流程已完成")
+            if strategy_decision.stage1_context:
+                tactical_thought_parts.append(f"思维种子: {strategy_decision.stage1_context.thinking_seed[:100]}...")
+            if strategy_decision.stage3_context:
+                tactical_thought_parts.append(f"生成路径数: {strategy_decision.stage3_context.path_count}")
+        else:
+            tactical_thought_parts.append("⚠️ 部分决策流程，使用可用信息")
+        
         tactical_thought = "\n".join(tactical_thought_parts)
         
         try:
@@ -685,11 +687,11 @@ class WorkflowPlanner(BasePlanner):
                 logger.warning("⚠️ LLM调用失败，使用智能回退策略")
                 
             # 🔧 智能回退策略
-            return self._intelligent_fallback_decision(chosen_path, query, thinking_seed, available_tools)
+            return self._intelligent_fallback_decision(chosen_path, query, thinking_seed, available_tools, strategy_decision)
             
         except Exception as e:
             logger.error(f"❌ LLM战术决策失败: {e}")
-            return self._emergency_fallback_decision(chosen_path, query, thinking_seed)
+            return self._emergency_fallback_decision(chosen_path, query, thinking_seed, strategy_decision)
     
     def _call_llm_for_decision(self, decision_prompt: str) -> Optional[str]:
         """调用LLM进行决策（统一的LLM调用接口）"""
@@ -876,95 +878,712 @@ class WorkflowPlanner(BasePlanner):
     def _build_llm_decision_prompt(self, user_query: str, chosen_path: ReasoningPath, 
                                   thinking_seed: str, available_tools: Dict[str, str],
                                   strategy_context: StrategyDecision) -> str:
-        """构建LLM决策提示（从NeogenesisPlanner迁移）"""
+        """
+        构建LLM决策提示 - 🚀 MCP升级版：让工具调用"感知"完整的模型上下文
         
-        tools_description = "\n".join([f"- {name}: {desc}" for name, desc in available_tools.items()])
+        核心升级：从"是否需要工具"升级为"如何最精确地调用工具"
+        这是将MCP思想注入工具系统的关键实现！
+        """
         
-        prompt = f"""你是Neogenesis智能助手的战术决策官，负责做出智能、合理的执行决策。
+        # 🔥 升级：构建更详细的工具信息，包含参数规范
+        detailed_tools_info = self._build_detailed_tools_info(available_tools)
+        
+        # 🔥 核心改进：构建丰富的五阶段上下文信息
+        stage_context_info = self._build_five_stage_context_summary(strategy_context)
+        
+        # 🔥 新增：基于上下文的智能工具推荐
+        contextual_tool_suggestions = self._generate_contextual_tool_suggestions(strategy_context, available_tools)
+        
+        prompt = f"""你是Neogenesis智能助手的高级战术决策官，负责基于完整的五阶段决策流程和MCP模型上下文协议，做出最精确的工具调用决策。
 
-📋 **决策上下文**
-用户问题: {user_query}
-选择的策略: {chosen_path.path_type}
+📋 **用户查询**
+{user_query}
+
+🧠 **五阶段决策流程上下文** (这是你精准工具调用的核心依据!)
+{stage_context_info}
+
+🎯 **最终选择的策略**
+策略类型: {chosen_path.path_type}
 策略描述: {chosen_path.description}
-思维种子: {thinking_seed}
+决策置信度: {strategy_context.confidence_score:.3f}
+最终推理: {strategy_context.final_reasoning}
 
-🔧 **可用工具**
-{tools_description if tools_description else "暂无可用工具"}
+🔧 **可用工具详细规范**
+{detailed_tools_info if detailed_tools_info else "暂无可用工具"}
 
-💡 **你的任务**
-请分析这个情况，然后做出智能判断：
+💡 **基于上下文的智能工具推荐**
+{contextual_tool_suggestions}
 
-1. **是否需要工具?** 
-   - 对于简单的问候、感谢、闲聊等，通常不需要工具
-   - 对于需要搜索信息、获取数据、验证想法的任务，才需要工具
-   - 即使策略是"分析型"或"批判型"，如果用户只是说"你好"，也不应该使用工具
+🚀 **你的核心任务**
+基于完整的五阶段决策上下文和MCP协议，做出最精确的工具调用决策：
 
-2. **如何回应?**
-   - 如果不需要工具：直接生成自然、友好、符合对话上下文的回答
-   - 如果需要工具：说明需要哪些工具以及原因
+1. **深度上下文分析**：
+   - 分析五阶段流程中每个阶段的关键信息
+   - 识别哪些信息需要补充或验证
+   - 确定最适合的工具调用策略
 
-📝 **请用以下JSON格式回答**
+2. **精准工具调用**：
+   - 如果需要工具：基于上下文生成完整的Action对象（包含精确的参数）
+   - 如果不需要工具：基于深度分析给出高质量回答
+   - 工具参数必须与五阶段上下文高度相关
+
+3. **智能参数生成**：
+   - 搜索工具：基于种子验证和路径分析生成精准查询
+   - 验证工具：基于决策推理生成具体验证内容
+   - 分析工具：基于策略类型选择最佳分析方式
+
+📝 **请用以下增强JSON格式回答**
 {{
     "needs_tools": false,  // true或false
-    "tool_reasoning": "判断是否需要工具的理由",
-    "direct_answer": "如果不需要工具，这里是你的直接回答。要自然、友好、有个性。",
-    "recommended_tools": [  // 如果需要工具，推荐的工具名称
-        // ["web_search", "knowledge_query"] 等
+    "context_analysis": "基于五阶段上下文的深度分析和洞察",
+    "tool_strategy": "工具调用策略和推理过程",
+    "actions": [  // 如果需要工具，提供完整的Action对象
+        {{
+            "tool_name": "具体工具名称",
+            "tool_input": {{
+                "param1": "基于上下文生成的精确参数值",
+                "param2": "另一个参数值"
+            }},
+            "reasoning": "选择此工具和参数的具体理由"
+        }}
     ],
-    "explanation": "你的整体思考和决策解释"
+    "direct_answer": "如果不需要工具，基于五阶段决策流程的深度洞察给出回答",
+    "confidence_score": 0.85,  // 对决策的置信度 (0-1)
+    "explanation": "基于完整五阶段上下文和MCP协议的决策解释"
 }}
 
-⚠️ **特别注意**
-- 回答要自然真诚，避免机械化的模板回答
-- 要考虑上下文，不要生硬地套用策略
-- JSON格式要严格正确"""
+⚠️ **MCP协议要求**
+- 工具调用必须基于完整的模型上下文，不能忽视五阶段决策信息
+- 参数生成要体现对上下文的深度理解和精准把握
+- 每个工具调用都要有明确的上下文依据和推理过程
+- 置信度评分要反映对上下文信息的把握程度
+- JSON格式必须严格正确，支持直接解析为Action对象"""
         
         return prompt
     
+    def _build_detailed_tools_info(self, available_tools: Dict[str, str]) -> str:
+        """
+        🔥 新增方法：构建详细的工具信息，包含参数规范
+        
+        这是MCP升级的关键：让LLM了解工具的完整接口规范，
+        而不仅仅是简单的描述。
+        """
+        if not available_tools:
+            return "暂无可用工具"
+        
+        detailed_info_parts = []
+        
+        for tool_name, tool_desc in available_tools.items():
+            # 获取工具的详细信息
+            tool_detail = self._get_tool_detailed_spec(tool_name, tool_desc)
+            detailed_info_parts.append(tool_detail)
+        
+        return "\n\n".join(detailed_info_parts)
+    
+    def _get_tool_detailed_spec(self, tool_name: str, tool_desc: str) -> str:
+        """获取工具的详细规范"""
+        # 基于工具名称提供详细的参数规范
+        tool_specs = {
+            'web_search': {
+                'description': tool_desc,
+                'parameters': {
+                    'query': {
+                        'type': 'string',
+                        'description': '搜索查询字符串，应该基于上下文分析生成精准的搜索词',
+                        'examples': ['AI系统架构设计最佳实践', '微服务架构 2024年最新趋势']
+                    },
+                    'max_results': {
+                        'type': 'integer', 
+                        'description': '返回结果数量，默认5',
+                        'optional': True
+                    }
+                }
+            },
+            'search_knowledge': {
+                'description': tool_desc,
+                'parameters': {
+                    'query': {
+                        'type': 'string',
+                        'description': '知识库搜索查询，应基于五阶段决策上下文生成',
+                        'examples': ['人工智能发展趋势', '云计算架构设计']
+                    },
+                    'max_results': {
+                        'type': 'integer',
+                        'description': '最大结果数量，默认5',
+                        'optional': True
+                    }
+                }
+            },
+            'idea_verification': {
+                'description': tool_desc,
+                'parameters': {
+                    'idea': {
+                        'type': 'string',
+                        'description': '要验证的想法或概念，应基于决策推理生成具体内容',
+                        'examples': ['基于微服务架构的AI系统设计方案', '采用容器化部署的可扩展性方案']
+                    },
+                    'criteria': {
+                        'type': 'array',
+                        'description': '验证标准列表，可选',
+                        'optional': True,
+                        'examples': [['feasibility', 'novelty', 'impact'], ['技术可行性', '成本效益', '实施难度']]
+                    }
+                }
+            },
+            'analyze_text': {
+                'description': tool_desc,
+                'parameters': {
+                    'text': {
+                        'type': 'string',
+                        'description': '要分析的文本内容',
+                        'examples': ['这是一个创新的AI解决方案...']
+                    },
+                    'analysis_type': {
+                        'type': 'string',
+                        'description': '分析类型：sentiment（情感分析）或complexity（复杂度分析）',
+                        'optional': True,
+                        'default': 'sentiment'
+                    }
+                }
+            },
+            'generate_image': {
+                'description': tool_desc,
+                'parameters': {
+                    'prompt': {
+                        'type': 'string',
+                        'description': '图像生成提示词，描述要生成的图像内容',
+                        'examples': ['一个现代化的AI数据中心架构图', '微服务系统的可视化架构']
+                    },
+                    'save_image': {
+                        'type': 'boolean',
+                        'description': '是否保存图像到本地，默认True',
+                        'optional': True
+                    }
+                }
+            }
+        }
+        
+        spec = tool_specs.get(tool_name, {
+            'description': tool_desc,
+            'parameters': {
+                'input': {
+                    'type': 'string',
+                    'description': '工具输入参数，请根据上下文生成'
+                }
+            }
+        })
+        
+        # 格式化工具规范
+        formatted_spec = f"""🔧 **{tool_name}**
+📝 描述: {spec['description']}
+📋 参数规范:"""
+        
+        for param_name, param_info in spec['parameters'].items():
+            optional_mark = " (可选)" if param_info.get('optional', False) else " (必需)"
+            formatted_spec += f"""
+  • {param_name}{optional_mark}: {param_info['type']}
+    - {param_info['description']}"""
+            
+            if 'examples' in param_info:
+                examples = param_info['examples'][:2]  # 最多显示2个例子
+                formatted_spec += f"""
+    - 示例: {', '.join(str(ex) for ex in examples)}"""
+            
+            if 'default' in param_info:
+                formatted_spec += f"""
+    - 默认值: {param_info['default']}"""
+        
+        return formatted_spec
+    
+    def _generate_contextual_tool_suggestions(self, strategy_context: StrategyDecision, 
+                                            available_tools: Dict[str, str]) -> str:
+        """
+        🔥 新增方法：基于五阶段决策上下文生成智能工具推荐
+        
+        这是MCP思想的体现：让工具选择基于完整的模型上下文，
+        而不是简单的关键词匹配。
+        """
+        if not strategy_context or not available_tools:
+            return "无法生成上下文相关的工具推荐"
+        
+        suggestions = []
+        
+        # 基于阶段二：种子验证结果
+        if strategy_context.stage2_context:
+            stage2 = strategy_context.stage2_context
+            if not stage2.verification_result or stage2.feasibility_score < 0.7:
+                if 'web_search' in available_tools or 'search_knowledge' in available_tools:
+                    suggestions.append("""
+🔍 **基于种子验证结果的建议**:
+- 种子验证显示需要更多信息支撑
+- 建议使用搜索工具获取相关资料和最新信息
+- 推荐查询: 基于种子内容生成精准搜索词""")
+            elif stage2.verification_result and stage2.feasibility_score >= 0.8:
+                # 🔥 新增：验证通过且评分高的情况
+                if 'verify_idea' in available_tools or 'idea_verification' in available_tools:
+                    suggestions.append("""
+🔍 **基于种子验证结果的建议**:
+- 种子验证通过且可行性评分高 ({:.2f})
+- 建议进一步验证具体实施方案
+- 推荐验证: 深入验证技术细节和实现路径""".format(stage2.feasibility_score))
+        
+        # 基于阶段三：路径生成情况
+        if strategy_context.stage3_context:
+            stage3 = strategy_context.stage3_context
+            if stage3.path_count > 0 and stage3.diversity_score > 0.7:
+                if 'idea_verification' in available_tools or 'verify_idea' in available_tools:
+                    suggestions.append("""
+💡 **基于路径生成结果的建议**:
+- 生成了多样化的思维路径 (多样性评分: {:.2f})
+- 建议验证最优路径的可行性
+- 推荐验证: 基于选择的策略路径生成验证内容""".format(stage3.diversity_score))
+        
+        # 基于阶段四：路径验证结果
+        if strategy_context.stage4_context:
+            stage4 = strategy_context.stage4_context
+            if len(stage4.verified_paths) > 1:
+                if 'analyze_text' in available_tools:
+                    suggestions.append("""
+📊 **基于路径验证结果的建议**:
+- 多个路径通过验证，需要深度分析
+- 建议分析不同路径的优劣势
+- 推荐分析: 对比分析各路径的特点""")
+        
+        # 基于最终策略类型 - 🔥 修复：支持中文策略类型
+        strategy_type = strategy_context.chosen_path.get('path_type', '').lower() if strategy_context.chosen_path else ''
+        
+        if 'exploratory' in strategy_type or 'investigative' in strategy_type or '探索' in strategy_type or '调研' in strategy_type:
+            if 'web_search' in available_tools or 'search_knowledge' in available_tools:
+                suggestions.append("""
+🔍 **基于策略类型的建议** (探索调研型):
+- 当前策略需要广泛的信息收集
+- 强烈建议使用网络搜索工具
+- 查询策略: 多角度、多关键词搜索""")
+        
+        elif 'analytical' in strategy_type or 'systematic' in strategy_type or '分析' in strategy_type or '系统' in strategy_type:
+            if 'idea_verification' in available_tools or 'verify_idea' in available_tools:
+                suggestions.append("""
+🔬 **基于策略类型的建议** (系统分析型):
+- 当前策略需要严谨的验证分析
+- 建议使用想法验证工具
+- 验证策略: 多维度、多标准验证""")
+        
+        elif 'creative' in strategy_type or 'innovative' in strategy_type or '创新' in strategy_type or '创意' in strategy_type:
+            if 'generate_image' in available_tools:
+                suggestions.append("""
+🎨 **基于策略类型的建议** (创新创意型):
+- 当前策略适合可视化表达
+- 建议考虑图像生成工具
+- 生成策略: 概念可视化、架构图示""")
+        
+        # 基于置信度
+        if strategy_context.confidence_score < 0.6:
+            suggestions.append("""
+⚠️ **基于决策置信度的建议**:
+- 当前决策置信度较低 ({:.2f})，建议补充信息
+- 优先使用搜索和验证工具提高决策质量
+- 策略: 先搜索后验证，逐步提升置信度""".format(strategy_context.confidence_score))
+        elif strategy_context.confidence_score >= 0.8:
+            # 🔥 新增：高置信度情况的建议
+            if 'search_knowledge' in available_tools:
+                suggestions.append("""
+✅ **基于决策置信度的建议**:
+- 当前决策置信度高 ({:.2f})，可进行深度探索
+- 建议搜索相关的最新发展和最佳实践
+- 策略: 在现有基础上拓展和深化认知""".format(strategy_context.confidence_score))
+        
+        # 🔥 新增：基于工具可用性的通用建议
+        if available_tools:
+            tool_names = list(available_tools.keys())
+            suggestions.append("""
+🛠️ **基于可用工具的建议**:
+- 当前可用工具: {}
+- 建议根据具体需求选择合适的工具组合
+- 策略: 优先使用最匹配当前上下文的工具""".format(', '.join(tool_names)))
+        
+        if not suggestions:
+            suggestions.append("""
+💭 **通用建议**:
+- 基于当前上下文，可以考虑直接回答
+- 如需补充信息，优先使用搜索工具
+- 如需验证想法，可使用验证工具""")
+        
+        return "\n".join(suggestions)
+    
+    def _build_five_stage_context_summary(self, strategy_context: StrategyDecision) -> str:
+        """
+        🔥 核心新增方法：构建五阶段决策流程的上下文摘要
+        
+        这是解决"最后一公里上下文丢失"的关键方法！
+        将StrategyDecision中的丰富五阶段上下文信息转换为LLM可理解的格式。
+        
+        Args:
+            strategy_context: 包含完整五阶段上下文的战略决策对象
+            
+        Returns:
+            格式化的五阶段上下文摘要字符串
+        """
+        context_parts = []
+        
+        # 阶段一：思维种子生成
+        if strategy_context.stage1_context:
+            stage1 = strategy_context.stage1_context
+            context_parts.append(f"""
+🌱 **阶段一：思维种子生成**
+- 种子内容: {stage1.thinking_seed[:200]}{'...' if len(stage1.thinking_seed) > 200 else ''}
+- 种子类型: {stage1.seed_type}
+- 生成方法: {stage1.generation_method}
+- 置信度: {stage1.confidence_score:.3f}
+- 推理过程: {stage1.reasoning_process[:150]}{'...' if len(stage1.reasoning_process) > 150 else ''}""")
+            
+            if stage1.source_information:
+                context_parts.append(f"- 信息源数量: {len(stage1.source_information)} 个")
+        
+        # 阶段二：种子验证
+        if strategy_context.stage2_context:
+            stage2 = strategy_context.stage2_context
+            verification_status = "✅ 通过" if stage2.verification_result else "❌ 未通过"
+            context_parts.append(f"""
+🔍 **阶段二：种子验证**
+- 验证结果: {verification_status}
+- 可行性评分: {stage2.feasibility_score:.3f}
+- 验证方法: {stage2.verification_method}""")
+            
+            if stage2.verification_evidence:
+                evidence_summary = "; ".join(stage2.verification_evidence[:3])
+                context_parts.append(f"- 验证证据: {evidence_summary}")
+            
+            if stage2.identified_risks:
+                risks_summary = "; ".join(stage2.identified_risks[:2])
+                context_parts.append(f"- 识别风险: {risks_summary}")
+        
+        # 阶段三：路径生成
+        if strategy_context.stage3_context:
+            stage3 = strategy_context.stage3_context
+            context_parts.append(f"""
+🛤️ **阶段三：多路径生成**
+- 生成路径数: {stage3.path_count}
+- 生成策略: {stage3.generation_strategy}
+- 多样性评分: {stage3.diversity_score:.3f}""")
+            
+            if stage3.path_quality_scores:
+                top_paths = sorted(stage3.path_quality_scores.items(), key=lambda x: x[1], reverse=True)[:3]
+                paths_info = ", ".join([f"{path}({score:.2f})" for path, score in top_paths])
+                context_parts.append(f"- 路径质量: {paths_info}")
+        
+        # 阶段四：路径验证
+        if strategy_context.stage4_context:
+            stage4 = strategy_context.stage4_context
+            context_parts.append(f"""
+✅ **阶段四：路径验证**
+- 验证路径数: {len(stage4.verified_paths)}""")
+            
+            if stage4.path_rankings:
+                top_rankings = stage4.path_rankings[:3]
+                rankings_info = ", ".join([f"{path}({score:.2f})" for path, score in top_rankings])
+                context_parts.append(f"- 路径排名: {rankings_info}")
+            
+            if stage4.rejected_paths:
+                context_parts.append(f"- 被拒绝路径: {len(stage4.rejected_paths)} 个")
+        
+        # 阶段五：MAB决策
+        if strategy_context.stage5_context:
+            stage5 = strategy_context.stage5_context
+            context_parts.append(f"""
+🎯 **阶段五：MAB最终决策**
+- 选择算法: {stage5.selection_algorithm}
+- 选择置信度: {stage5.selection_confidence:.3f}
+- 决策推理: {stage5.decision_reasoning[:200]}{'...' if len(stage5.decision_reasoning) > 200 else ''}""")
+            
+            if stage5.golden_template_used:
+                context_parts.append("- ✨ 使用了黄金模板 (基于历史成功经验)")
+        
+        # 总体决策质量指标
+        if strategy_context.performance_metrics:
+            metrics = strategy_context.performance_metrics
+            context_parts.append(f"""
+📊 **决策质量指标**
+- 总执行时间: {strategy_context.total_execution_time:.2f}秒
+- 决策完整性: {'✅ 完整' if strategy_context.is_complete else '⚠️ 部分'}""")
+            
+            if isinstance(metrics, dict):
+                for key, value in metrics.items():
+                    if isinstance(value, (int, float)):
+                        context_parts.append(f"- {key}: {value:.3f}")
+        
+        # 如果没有任何阶段上下文，提供基本信息
+        if not context_parts:
+            context_parts.append(f"""
+⚠️ **简化决策流程**
+- 决策轮次: {strategy_context.round_number}
+- 决策时间: {strategy_context.timestamp}
+- 基础推理: {strategy_context.final_reasoning}""")
+        
+        return "\n".join(context_parts)
+    
     def _parse_llm_decision_response(self, response: str, chosen_path: ReasoningPath, 
                                    query: str) -> Dict[str, Any]:
-        """解析LLM的决策响应（从NeogenesisPlanner迁移）"""
+        """
+        解析LLM的决策响应 - 🚀 MCP升级版：直接解析完整的Action对象
+        
+        核心升级：支持解析LLM直接生成的完整Action对象，包含精确的工具参数
+        这是MCP思想的体现：让LLM基于完整上下文生成精准的工具调用
+        """
         try:
             import json
             import re
             
-            # 提取JSON部分
-            json_match = re.search(r'```json\s*(\{.*?\})\s*```', response, re.DOTALL)
-            if not json_match:
-                json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            # 提取JSON部分 - 支持更灵活的格式
+            json_patterns = [
+                r'```json\s*(\{.*?\})\s*```',  # 标准markdown json块
+                r'```\s*(\{.*?\})\s*```',      # 简化的代码块
+                r'\{.*\}',                     # 直接的JSON对象
+            ]
             
-            if json_match:
-                json_str = json_match.group(1) if json_match.groups() else json_match.group()
+            json_str = None
+            for pattern in json_patterns:
+                json_match = re.search(pattern, response, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(1) if json_match.groups() else json_match.group()
+                    break
+            
+            if json_str:
                 decision_data = json.loads(json_str)
                 
-                # 构建标准化决策结果
+                # 🔥 升级：构建增强的决策结果，支持MCP协议
                 result = {
                     'needs_tools': decision_data.get('needs_tools', False),
+                    'context_analysis': decision_data.get('context_analysis', ''),
+                    'tool_strategy': decision_data.get('tool_strategy', ''),
                     'direct_answer': decision_data.get('direct_answer', ''),
+                    'confidence_score': decision_data.get('confidence_score', 0.5),
                     'explanation': decision_data.get('explanation', ''),
-                    'tool_reasoning': decision_data.get('tool_reasoning', ''),
                     'actions': []
                 }
                 
-                # 如果需要工具，转换为Action对象
-                if result['needs_tools'] and decision_data.get('recommended_tools'):
+                # 🚀 核心升级：直接解析完整的Action对象
+                if result['needs_tools'] and decision_data.get('actions'):
+                    for action_data in decision_data.get('actions', []):
+                        if isinstance(action_data, dict):
+                            # 直接从LLM响应中解析完整的Action对象
+                            tool_name = action_data.get('tool_name')
+                            tool_input = action_data.get('tool_input', {})
+                            reasoning = action_data.get('reasoning', '')
+                            
+                            if tool_name:
+                                # 验证和清理工具输入参数
+                                validated_input = self._validate_and_clean_tool_input(
+                                    tool_name, tool_input, query, chosen_path
+                                )
+                                
+                                action = Action(
+                                    tool_name=tool_name,
+                                    tool_input=validated_input
+                                )
+                                
+                                # 添加推理信息到Action对象（如果支持）
+                                if hasattr(action, 'reasoning'):
+                                    action.reasoning = reasoning
+                                
+                                result['actions'].append(action)
+                                
+                                logger.info(f"🎯 解析Action: {tool_name} with params: {list(validated_input.keys())}")
+                
+                # 🔥 新增：兼容旧格式的recommended_tools（向后兼容）
+                elif result['needs_tools'] and decision_data.get('recommended_tools'):
+                    logger.info("📋 使用兼容模式解析recommended_tools")
                     for tool_name in decision_data.get('recommended_tools', []):
                         if isinstance(tool_name, str):
-                            # 基于工具名称生成合适的参数
-                            tool_input = self._generate_tool_input(tool_name, query, chosen_path)
+                            # 基于上下文生成智能参数
+                            tool_input = self._generate_contextual_tool_input(
+                                tool_name, query, chosen_path, decision_data
+                            )
                             result['actions'].append(Action(
                                 tool_name=tool_name,
                                 tool_input=tool_input
                             ))
                 
-                logger.info(f"🔍 LLM决策解析成功: {result['needs_tools']=}, 工具数={len(result['actions'])}")
+                logger.info(f"🔍 MCP决策解析成功: needs_tools={result['needs_tools']}, "
+                          f"actions={len(result['actions'])}, confidence={result['confidence_score']:.3f}")
                 return result
             
+        except json.JSONDecodeError as e:
+            logger.warning(f"⚠️ JSON解析失败: {e}")
         except Exception as e:
             logger.warning(f"⚠️ 解析LLM决策响应失败: {e}")
         
-        # 解析失败，使用响应文本生成回退决策
-        return self._extract_fallback_from_response(response, chosen_path, query)
+        # 解析失败，使用增强的回退策略
+        return self._extract_enhanced_fallback_from_response(response, chosen_path, query)
+    
+    def _validate_and_clean_tool_input(self, tool_name: str, tool_input: Dict[str, Any], 
+                                     query: str, chosen_path: ReasoningPath) -> Dict[str, Any]:
+        """
+        🔥 新增方法：验证和清理工具输入参数
+        
+        确保LLM生成的工具参数符合工具规范，并进行必要的清理和补充
+        """
+        if not isinstance(tool_input, dict):
+            logger.warning(f"⚠️ 工具输入不是字典格式，使用默认参数: {tool_name}")
+            return self._generate_tool_input(tool_name, query, chosen_path)
+        
+        # 基于工具名称进行参数验证和清理
+        if tool_name == 'search_knowledge':
+            # 确保有query参数
+            if 'query' not in tool_input or not tool_input['query']:
+                tool_input['query'] = query
+            
+            # 验证max_results参数
+            if 'max_results' in tool_input:
+                try:
+                    tool_input['max_results'] = max(1, min(10, int(tool_input['max_results'])))
+                except (ValueError, TypeError):
+                    tool_input['max_results'] = 5
+        
+        elif tool_name == 'idea_verification' or tool_name == 'verify_idea':
+            # 确保有idea参数
+            if 'idea' not in tool_input or not tool_input['idea']:
+                tool_input['idea'] = query
+            
+            # 验证criteria参数
+            if 'criteria' in tool_input and isinstance(tool_input['criteria'], list):
+                # 保持criteria为列表格式
+                pass
+            elif 'criteria' in tool_input:
+                # 尝试转换为列表
+                tool_input['criteria'] = ['feasibility', 'novelty', 'impact']
+        
+        elif tool_name == 'analyze_text':
+            # 确保有text参数
+            if 'text' not in tool_input or not tool_input['text']:
+                tool_input['text'] = query
+            
+            # 验证analysis_type参数
+            valid_types = ['sentiment', 'complexity']
+            if 'analysis_type' in tool_input and tool_input['analysis_type'] not in valid_types:
+                tool_input['analysis_type'] = 'sentiment'
+        
+        elif tool_name == 'generate_image':
+            # 确保有prompt参数
+            if 'prompt' not in tool_input or not tool_input['prompt']:
+                tool_input['prompt'] = f"基于查询生成图像: {query}"
+            
+            # 验证save_image参数
+            if 'save_image' in tool_input:
+                tool_input['save_image'] = bool(tool_input['save_image'])
+            else:
+                tool_input['save_image'] = True
+        
+        elif tool_name == 'web_search':
+            # 确保有query参数
+            if 'query' not in tool_input or not tool_input['query']:
+                tool_input['query'] = query
+        
+        # 移除空值和无效参数
+        cleaned_input = {k: v for k, v in tool_input.items() if v is not None and v != ''}
+        
+        logger.debug(f"🧹 工具参数清理完成: {tool_name} -> {list(cleaned_input.keys())}")
+        return cleaned_input
+    
+    def _generate_contextual_tool_input(self, tool_name: str, query: str, chosen_path: ReasoningPath, 
+                                      decision_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        🔥 新增方法：基于上下文生成智能工具参数
+        
+        这是MCP思想的体现：工具参数不仅基于查询，还基于完整的决策上下文
+        """
+        # 从决策数据中提取上下文信息
+        context_analysis = decision_data.get('context_analysis', '')
+        tool_strategy = decision_data.get('tool_strategy', '')
+        
+        if tool_name == 'search_knowledge':
+            # 基于上下文分析生成更精准的搜索查询
+            enhanced_query = query
+            if context_analysis and '需要' in context_analysis:
+                # 从上下文分析中提取关键信息
+                enhanced_query = f"{query} {context_analysis[:50]}"
+            
+            return {
+                'query': enhanced_query.strip(),
+                'max_results': 5
+            }
+        
+        elif tool_name == 'idea_verification' or tool_name == 'verify_idea':
+            # 基于策略类型选择验证标准
+            criteria = ['feasibility', 'novelty', 'impact']
+            if 'analytical' in chosen_path.path_type.lower():
+                criteria = ['feasibility', 'technical_viability', 'complexity']
+            elif 'creative' in chosen_path.path_type.lower():
+                criteria = ['novelty', 'creativity', 'impact']
+            
+            return {
+                'idea': query,
+                'criteria': criteria
+            }
+        
+        elif tool_name == 'analyze_text':
+            # 基于策略类型选择分析方式
+            analysis_type = 'sentiment'
+            if 'analytical' in chosen_path.path_type.lower():
+                analysis_type = 'complexity'
+            
+            return {
+                'text': query,
+                'analysis_type': analysis_type
+            }
+        
+        elif tool_name == 'generate_image':
+            # 基于查询和策略生成图像提示
+            image_prompt = f"基于{chosen_path.path_type}策略，为'{query}'生成可视化图像"
+            
+            return {
+                'prompt': image_prompt,
+                'save_image': True
+            }
+        
+        # 默认情况
+        return self._generate_tool_input(tool_name, query, chosen_path)
+    
+    def _extract_enhanced_fallback_from_response(self, response: str, chosen_path: ReasoningPath, 
+                                               query: str) -> Dict[str, Any]:
+        """
+        🔥 升级方法：增强的回退响应提取
+        
+        当JSON解析失败时，使用更智能的方法从响应中提取有用信息
+        """
+        logger.info("🔄 使用增强回退策略解析响应")
+        
+        # 尝试从响应中提取关键信息
+        needs_tools = False
+        direct_answer = response
+        
+        # 检查是否提到了工具使用
+        tool_keywords = ['搜索', 'search', '验证', 'verify', '分析', 'analyze', '生成', 'generate']
+        if any(keyword in response.lower() for keyword in tool_keywords):
+            needs_tools = True
+        
+        # 如果响应很短，可能是直接回答
+        if len(response.strip()) < 100 and not needs_tools:
+            needs_tools = False
+        
+        result = {
+            'needs_tools': needs_tools,
+            'context_analysis': f"基于{chosen_path.path_type}策略的回退分析",
+            'tool_strategy': "由于解析失败，使用回退策略",
+            'direct_answer': direct_answer if not needs_tools else "",
+            'confidence_score': 0.3,  # 回退策略的置信度较低
+            'explanation': f"响应解析失败，使用回退策略处理。策略类型：{chosen_path.path_type}",
+            'actions': []
+        }
+        
+        # 如果判断需要工具，生成默认的搜索Action
+        if needs_tools:
+            result['actions'].append(Action(
+                tool_name='search_knowledge',
+                tool_input={'query': query, 'max_results': 3}
+            ))
+        
+        logger.info(f"🔄 回退策略完成: needs_tools={needs_tools}, confidence=0.3")
+        return result
     
     def _generate_tool_input(self, tool_name: str, query: str, path: ReasoningPath) -> Dict[str, Any]:
         """根据工具名称生成合适的输入参数（从NeogenesisPlanner迁移）"""
@@ -1005,11 +1624,29 @@ class WorkflowPlanner(BasePlanner):
             }
     
     def _intelligent_fallback_decision(self, chosen_path: ReasoningPath, query: str, 
-                                     thinking_seed: str, available_tools: Dict[str, str]) -> Dict[str, Any]:
-        """智能回退决策（从NeogenesisPlanner迁移）"""
+                                     thinking_seed: str, available_tools: Dict[str, str],
+                                     strategy_decision: Optional[StrategyDecision] = None) -> Dict[str, Any]:
+        """
+        智能回退决策 - 🔥 增强版：利用五阶段决策上下文
+        
+        当LLM调用失败时，基于五阶段决策流程的上下文信息做出智能回退决策。
+        """
         logger.info("🔧 使用智能回退决策策略")
         
         query_lower = query.lower().strip()
+        
+        # 🔥 新增：利用五阶段决策上下文增强回退决策
+        context_insight = ""
+        if strategy_decision and strategy_decision.is_complete:
+            # 基于五阶段上下文生成更智能的回答
+            if strategy_decision.stage2_context and strategy_decision.stage2_context.verification_result:
+                context_insight = f"基于前期分析，这个问题的可行性评分为 {strategy_decision.stage2_context.feasibility_score:.2f}。"
+            
+            if strategy_decision.stage3_context and strategy_decision.stage3_context.path_count > 0:
+                context_insight += f"我们考虑了 {strategy_decision.stage3_context.path_count} 种不同的处理方式。"
+            
+            if strategy_decision.stage5_context and strategy_decision.stage5_context.golden_template_used:
+                context_insight += "这个回答基于我们的成功经验模板。"
         
         # 简单问候和感谢的处理
         greeting_patterns = ['你好', 'hello', 'hi', '您好', '早上好', '下午好', '晚上好']
@@ -1066,22 +1703,47 @@ class WorkflowPlanner(BasePlanner):
                 'actions': []
             }
         
-        # 默认情况：生成更自然的回答，而不是暴露内部思维种子
+        # 默认情况：生成更自然的回答，结合五阶段决策上下文
+        enhanced_answer = f"我已经仔细分析了您的问题「{query}」。基于{chosen_path.path_type}的处理方式，"
+        
+        if context_insight:
+            enhanced_answer += f"{context_insight} "
+        
+        enhanced_answer += "我认为这个问题可以直接为您提供有用的回答。如果您需要更详细的信息或有其他相关问题，请随时告诉我，我会很乐意为您进一步解答。"
+        
         return {
             'needs_tools': False,
-            'direct_answer': f"我已经仔细分析了您的问题「{query}」。基于{chosen_path.path_type}的处理方式，我认为这个问题可以直接为您提供有用的回答。如果您需要更详细的信息或有其他相关问题，请随时告诉我，我会很乐意为您进一步解答。",
-            'explanation': f"基于'{chosen_path.path_type}'策略提供智能回答",
+            'direct_answer': enhanced_answer,
+            'explanation': f"基于'{chosen_path.path_type}'策略和五阶段决策上下文提供智能回答",
             'tool_reasoning': "当前查询适合直接回答，无需额外工具辅助",
             'actions': []
         }
     
     def _emergency_fallback_decision(self, chosen_path: ReasoningPath, query: str, 
-                                   thinking_seed: str) -> Dict[str, Any]:
-        """紧急回退决策（从NeogenesisPlanner迁移）"""
+                                   thinking_seed: str, strategy_decision: Optional[StrategyDecision] = None) -> Dict[str, Any]:
+        """
+        紧急回退决策 - 🔥 增强版：即使在紧急情况下也尽量利用上下文
+        
+        当所有其他决策方法都失败时的最后防线，但仍尝试利用可用的上下文信息。
+        """
         logger.warning("🚨 使用紧急回退决策")
+        
+        # 🔥 新增：即使在紧急情况下也尝试提供有用的上下文信息
+        emergency_context = ""
+        if strategy_decision:
+            if strategy_decision.final_reasoning:
+                emergency_context = f"虽然遇到了技术问题，但基于我们的分析：{strategy_decision.final_reasoning[:100]}..."
+            elif strategy_decision.thinking_seed:
+                emergency_context = f"基于初步分析，这个问题涉及：{strategy_decision.thinking_seed[:100]}..."
+        
+        base_message = "抱歉，我在处理您的请求时遇到了一些技术问题。"
+        if emergency_context:
+            base_message += f" {emergency_context} "
+        base_message += "请稍后再试或重新表述您的问题。"
+        
         return {
             'needs_tools': False,
-            'direct_answer': "抱歉，我在处理您的请求时遇到了一些技术问题。请稍后再试或重新表述您的问题。",
+            'direct_answer': base_message,
             'explanation': "系统遇到错误，返回安全回退回答",
             'tool_reasoning': "系统错误，无法正常判断",
             'actions': []

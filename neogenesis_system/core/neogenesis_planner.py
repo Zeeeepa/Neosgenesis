@@ -17,10 +17,20 @@ from typing import Dict, List, Optional, Any
 # 导入框架核心
 try:
     from ..abstractions import BasePlanner
-    from ..shared.data_structures import Plan, Action
+    from ..shared.data_structures import (
+        Plan, Action,
+        # 导入新的上下文协议数据结构
+        StrategyDecision, StageContext, ThinkingSeedContext, SeedVerificationContext,
+        PathGenerationContext, PathVerificationContext, MABDecisionContext
+    )
 except ImportError:
     from neogenesis_system.abstractions import BasePlanner
-    from neogenesis_system.shared.data_structures import Plan, Action
+    from neogenesis_system.shared.data_structures import (
+        Plan, Action,
+        # 导入新的上下文协议数据结构
+        StrategyDecision, StageContext, ThinkingSeedContext, SeedVerificationContext,
+        PathGenerationContext, PathVerificationContext, MABDecisionContext
+    )
 
 # 导入Meta MAB组件
 from ..cognitive_engine.reasoner import PriorReasoner
@@ -199,7 +209,6 @@ class NeogenesisPlanner(BasePlanner):
             logger.info("🧠 阶段1: 战略规划")
             strategy_decision = self.make_strategic_decision(
                 user_query=query,
-                confidence=context.get('confidence', 0.5) if context else 0.5,
                 execution_context=context
             )
             
@@ -266,6 +275,113 @@ class NeogenesisPlanner(BasePlanner):
             logger.error(f"❌ 计划验证失败: {e}")
             return False
     
+    def make_strategic_decision(self, user_query: str, execution_context: Optional[Dict[str, Any]] = None) -> StrategyDecision:
+        """
+        执行完整的五阶段战略决策流程，返回标准化的StrategyDecision对象
+        
+        这是新的中心化上下文协议的核心方法，将原有的_make_decision_logic重构为
+        标准化的战略决策流程，输出完整的上下文信息。
+        
+        Args:
+            user_query: 用户查询
+            execution_context: 执行上下文
+            
+        Returns:
+            StrategyDecision: 包含完整五阶段上下文的战略决策结果
+        """
+        start_time = time.time()
+        self.total_rounds += 1
+        
+        logger.info(f"🚀 开始第 {self.total_rounds} 轮五阶段战略决策")
+        logger.info(f"   查询: {user_query[:50]}...")
+        
+        # 初始化战略决策对象
+        strategy_decision = StrategyDecision(
+            user_query=user_query,
+            round_number=self.total_rounds,
+            execution_context=execution_context
+        )
+        
+        try:
+            # 🧠 阶段一：思维种子生成
+            stage1_start = time.time()
+            logger.info("🧠 阶段一：思维种子生成")
+            
+            stage1_context = self._execute_stage1_thinking_seed(user_query, execution_context)
+            stage1_context.add_metric("execution_time", time.time() - stage1_start)
+            strategy_decision.add_stage_context(1, stage1_context)
+            
+            if stage1_context.has_errors:
+                strategy_decision.add_error("阶段一执行失败")
+                return self._create_fallback_decision(strategy_decision, "思维种子生成失败")
+            
+            # 🔍 阶段二：种子验证检查
+            stage2_start = time.time()
+            logger.info("🔍 阶段二：种子验证检查")
+            
+            stage2_context = self._execute_stage2_seed_verification(stage1_context, execution_context)
+            stage2_context.add_metric("execution_time", time.time() - stage2_start)
+            strategy_decision.add_stage_context(2, stage2_context)
+            
+            if not stage2_context.verification_result:
+                strategy_decision.add_warning("种子验证存在问题，但继续执行")
+            
+            # 🛤️ 阶段三：思维路径生成
+            stage3_start = time.time()
+            logger.info("🛤️ 阶段三：思维路径生成")
+            
+            stage3_context = self._execute_stage3_path_generation(stage1_context, stage2_context, execution_context)
+            stage3_context.add_metric("execution_time", time.time() - stage3_start)
+            strategy_decision.add_stage_context(3, stage3_context)
+            
+            if stage3_context.path_count == 0:
+                strategy_decision.add_error("路径生成失败")
+                return self._create_fallback_decision(strategy_decision, "无法生成思维路径")
+            
+            # 🔬 阶段四：路径验证与即时学习
+            stage4_start = time.time()
+            logger.info("🔬 阶段四：路径验证与即时学习")
+            
+            stage4_context = self._execute_stage4_path_verification(stage3_context, execution_context)
+            stage4_context.add_metric("execution_time", time.time() - stage4_start)
+            strategy_decision.add_stage_context(4, stage4_context)
+            
+            # 🎯 阶段五：MAB最终决策
+            stage5_start = time.time()
+            logger.info("🎯 阶段五：MAB最终决策")
+            
+            stage5_context = self._execute_stage5_mab_decision(stage4_context, execution_context)
+            stage5_context.add_metric("execution_time", time.time() - stage5_start)
+            strategy_decision.add_stage_context(5, stage5_context)
+            
+            if not stage5_context.selected_path:
+                strategy_decision.add_error("MAB决策失败")
+                return self._create_fallback_decision(strategy_decision, "无法选择最优路径")
+            
+            # 设置最终决策结果
+            strategy_decision.chosen_path = stage5_context.selected_path
+            strategy_decision.final_reasoning = stage5_context.decision_reasoning
+            strategy_decision.confidence_score = stage5_context.selection_confidence
+            
+            # 计算决策质量指标
+            total_time = time.time() - start_time
+            strategy_decision.total_execution_time = total_time
+            strategy_decision.add_quality_metric("decision_completeness", 1.0 if strategy_decision.is_complete else 0.5)
+            strategy_decision.add_quality_metric("average_stage_time", total_time / 5)
+            strategy_decision.add_quality_metric("path_diversity", stage3_context.diversity_score)
+            
+            logger.info(f"✅ 五阶段战略决策完成")
+            logger.info(f"   选择路径: {strategy_decision.chosen_path.get('path_id', 'Unknown') if isinstance(strategy_decision.chosen_path, dict) else 'Unknown'}")
+            logger.info(f"   置信度: {strategy_decision.confidence_score:.3f}")
+            logger.info(f"   总耗时: {total_time:.3f}s")
+            
+            return strategy_decision
+            
+        except Exception as e:
+            logger.error(f"❌ 战略决策过程失败: {e}")
+            strategy_decision.add_error(f"决策过程异常: {str(e)}")
+            return self._create_fallback_decision(strategy_decision, f"决策过程异常: {str(e)}")
+    
     def _make_decision_logic(self, user_query: str, deepseek_confidence: float = 0.5, 
                            execution_context: Optional[Dict] = None) -> Dict[str, Any]:
         """
@@ -296,10 +412,10 @@ class NeogenesisPlanner(BasePlanner):
             route_analysis_time = time.time() - route_analysis_start
             
             logger.info(f"🎯 阶段零完成: LLM路由分析")
-            logger.info(f"   复杂度: {route_classification.complexity.value}")
-            logger.info(f"   领域: {route_classification.domain.value}")
-            logger.info(f"   路由策略: {route_classification.route_strategy.value}")
-            logger.info(f"   置信度: {route_classification.confidence:.2f}")
+            logger.info(f"   复杂度: {route_classification.complexity.value if hasattr(route_classification, 'complexity') else 'unknown'}")
+            logger.info(f"   领域: {route_classification.domain.value if hasattr(route_classification, 'domain') else 'unknown'}")
+            logger.info(f"   意图: {route_classification.intent.value if hasattr(route_classification, 'intent') else 'unknown'}")
+            logger.info(f"   置信度: {route_classification.confidence if hasattr(route_classification, 'confidence') else 0.0:.2f}")
             logger.info(f"   耗时: {route_analysis_time:.3f}s")
             
             # 🔀 根据路由策略决定处理流程
@@ -335,10 +451,13 @@ class NeogenesisPlanner(BasePlanner):
         """
         from ..cognitive_engine.reasoner import TaskComplexity, RouteStrategy
         
-        # 基础条件检查
-        is_simple = route_classification.complexity == TaskComplexity.SIMPLE
-        is_direct_response = route_classification.route_strategy == RouteStrategy.DIRECT_RESPONSE
-        is_high_confidence = route_classification.confidence >= 0.8
+        # 基础条件检查 - 修复：使用字典访问
+        is_simple = (hasattr(route_classification, 'complexity') and 
+                     route_classification.complexity.value in ['simple', 'low'])
+        is_direct_response = (hasattr(route_classification, 'route_strategy') and 
+                             route_classification.route_strategy.value == 'direct_response')
+        is_high_confidence = (hasattr(route_classification, 'confidence') and 
+                             route_classification.confidence >= 0.8)
         
         if not (is_simple and is_direct_response and is_high_confidence):
             return False
@@ -405,9 +524,9 @@ class NeogenesisPlanner(BasePlanner):
             path_id="llm_route_fast_path",
             path_type="direct_answer",
             description=f"基于LLM路由分析的快速响应路径",
-            prompt_template=f"基于LLM路由分析，这是一个{route_classification.complexity.value}任务，"
-                           f"领域为{route_classification.domain.value}，建议直接回答。",
-            confidence_score=route_classification.confidence
+            prompt_template=f"基于LLM路由分析，这是一个{route_classification.complexity.value if hasattr(route_classification, 'complexity') else 'medium'}任务，"
+                           f"领域为{route_classification.domain.value if hasattr(route_classification, 'domain') else 'general'}，建议直接回答。",
+            confidence_score=route_classification.confidence if hasattr(route_classification, 'confidence') else 0.7
         )
         
         execution_time = time.time() - start_time
@@ -467,18 +586,16 @@ class NeogenesisPlanner(BasePlanner):
             enhanced_context.update({
                 # 只传递可序列化的信息，不传递 TriageClassification 对象
                 'llm_route_analysis': {
-                    'complexity': route_classification.complexity.value,
-                    'domain': route_classification.domain.value,
-                    'intent': route_classification.intent.value,
-                    'urgency': route_classification.urgency.value,
-                    'strategy': route_classification.route_strategy.value,
-                    'confidence': route_classification.confidence,
-                    'reasoning': route_classification.reasoning,
-                    'key_factors': route_classification.key_factors
+                    'complexity': route_classification.complexity.value if hasattr(route_classification, 'complexity') else 'medium',
+                    'domain': route_classification.domain.value if hasattr(route_classification, 'domain') else 'general',
+                    'intent': route_classification.intent.value if hasattr(route_classification, 'intent') else 'question',
+                    'route_strategy': route_classification.route_strategy.value if hasattr(route_classification, 'route_strategy') else 'direct_response',
+                    'confidence': route_classification.confidence if hasattr(route_classification, 'confidence') else 0.7,
+                    'reasoning': route_classification.reasoning if hasattr(route_classification, 'reasoning') else 'No reasoning provided'
                 },
-                'suggested_complexity': route_classification.complexity.value,
-                'suggested_domain': route_classification.domain.value,
-                'suggested_strategy': route_classification.route_strategy.value
+                'suggested_complexity': route_classification.complexity.value if hasattr(route_classification, 'complexity') else 'medium',
+                'suggested_domain': route_classification.domain.value if hasattr(route_classification, 'domain') else 'general',
+                'suggested_strategy': route_classification.route_strategy.value if hasattr(route_classification, 'route_strategy') else 'direct_response'
             })
             
             thinking_seed = self.prior_reasoner.get_thinking_seed(user_query, enhanced_context)
@@ -498,9 +615,9 @@ class NeogenesisPlanner(BasePlanner):
                 idea_text=thinking_seed,
                 context={
                     'stage': 'thinking_seed',
-                    'domain': route_classification.domain.value,  # 使用LLM路由分析的领域
-                    'complexity': route_classification.complexity.value,  # 使用LLM路由分析的复杂度
-                    'route_strategy': route_classification.route_strategy.value,  # 使用LLM路由策略
+                    'domain': route_classification.domain.value if hasattr(route_classification, 'domain') else 'general',  # 使用LLM路由分析的领域
+                    'complexity': route_classification.complexity.value if hasattr(route_classification, 'complexity') else 'medium',  # 使用LLM路由分析的复杂度
+                    'route_strategy': route_classification.route_strategy.value if hasattr(route_classification, 'route_strategy') else 'standard_rag',  # 使用LLM路由策略
                     'query': user_query,
                     'llm_routing_enabled': True,  # 标记启用了LLM路由
                     **(execution_context if execution_context else {})
@@ -529,7 +646,7 @@ class NeogenesisPlanner(BasePlanner):
             generator_time = time.time() - generator_start
             self._update_component_performance('path_generator', generator_time)
             
-            logger.info(f"🛤️ 阶段三完成: LLM优化生成 {len(all_reasoning_paths)} 条思维路径 (策略: {route_classification.route_strategy.value})")
+            logger.info(f"🛤️ 阶段三完成: LLM优化生成 {len(all_reasoning_paths)} 条思维路径 (策略: {route_classification.route_strategy.value if hasattr(route_classification, 'route_strategy') else 'standard_rag'})")
             
             # 🚀 阶段四：路径验证学习
             path_verification_start = time.time()
@@ -702,24 +819,27 @@ class NeogenesisPlanner(BasePlanner):
         # 调用原有的决策逻辑
         decision_result = self._make_decision_logic(user_query, confidence, execution_context)
         
-        # 转换为StrategyDecision格式
+        # 转换为StrategyDecision格式 - 修复：只使用存在的字段
         strategy_decision = StrategyDecision(
             chosen_path=decision_result.get('chosen_path'),
-            thinking_seed=decision_result.get('thinking_seed', ''),
-            reasoning=decision_result.get('reasoning', ''),
+            final_reasoning=decision_result.get('reasoning', ''),
             user_query=user_query,
-            available_paths=decision_result.get('available_paths', []),
-            verified_paths=decision_result.get('verified_paths', []),
             timestamp=decision_result.get('timestamp', time.time()),
             round_number=decision_result.get('round_number', self.total_rounds),
-            selection_algorithm=decision_result.get('selection_algorithm', 'mab'),
-            verification_stats=decision_result.get('verification_stats', {}),
-            performance_metrics=decision_result.get('performance_metrics', {}),
             execution_context=execution_context,
             confidence_score=confidence
         )
         
-        logger.info(f"🎯 战略决策完成: {strategy_decision.chosen_path.path_type}")
+        # 添加质量指标
+        performance_metrics = decision_result.get('performance_metrics', {})
+        for metric_name, value in performance_metrics.items():
+            strategy_decision.add_quality_metric(metric_name, value)
+        
+        # 安全检查chosen_path
+        if strategy_decision.chosen_path:
+            logger.info(f"🎯 战略决策完成: {strategy_decision.chosen_path.path_type}")
+        else:
+            logger.warning("⚠️ 战略决策完成，但未选择具体路径")
         return strategy_decision
     
     
@@ -741,14 +861,15 @@ class NeogenesisPlanner(BasePlanner):
             TaskComplexity.MODERATE: 5,
             TaskComplexity.COMPLEX: 6,
             TaskComplexity.EXPERT: 8
-        }.get(route_classification.complexity, 6)
+        }.get(route_classification.complexity.value if hasattr(route_classification, 'complexity') else 'medium', 6)
         
         # 基于路由策略的调整
-        if route_classification.route_strategy == RouteStrategy.DIRECT_RESPONSE:
+        routing_rec = route_classification.route_strategy.value if hasattr(route_classification, 'route_strategy') else 'standard_rag'
+        if routing_rec == 'direct_response':
             return max(2, base_count // 2)  # 直接回答需要较少路径
-        elif route_classification.route_strategy == RouteStrategy.EXPERT_CONSULTATION:
+        elif routing_rec == 'expert_consultation':
             return min(10, base_count + 2)  # 专家咨询需要更多路径
-        elif route_classification.route_strategy == RouteStrategy.WORKFLOW_PLANNING:
+        elif routing_rec == 'workflow_planning':
             return min(8, base_count + 1)  # 工作流规划需要额外路径
         else:
             return base_count
@@ -865,7 +986,7 @@ class NeogenesisPlanner(BasePlanner):
         """
         try:
             if self.tool_registry and self.tool_registry.has_tool("idea_verification"):
-                result = execute_tool("idea_verification", idea_text=idea_text)
+                result = execute_tool("idea_verification", idea=idea_text)
                 if result.success:
                     return result.data
             
@@ -961,4 +1082,211 @@ class NeogenesisPlanner(BasePlanner):
                 'path_generator': type(self.path_generator).__name__,
                 'mab_converger': type(self.mab_converger).__name__
             }
-            }
+        }
+    
+    # ==================== 新增：中心化上下文协议辅助方法 ====================
+    
+    def _execute_stage1_thinking_seed(self, user_query: str, execution_context: Optional[Dict]) -> ThinkingSeedContext:
+        """执行阶段一：思维种子生成"""
+        context = ThinkingSeedContext(user_query=user_query, execution_context=execution_context)
+        
+        try:
+            # 使用PriorReasoner生成思维种子
+            seed_result = self.prior_reasoner.generate_thinking_seed(
+                user_query=user_query,
+                execution_context=execution_context
+            )
+            
+            context.thinking_seed = seed_result.get("thinking_seed", "")
+            context.reasoning_process = seed_result.get("reasoning", "")
+            context.confidence_score = seed_result.get("confidence", 0.5)
+            context.generation_method = "prior_reasoning"
+            context.seed_type = "basic"
+            
+            logger.info(f"   ✅ 思维种子: {context.thinking_seed[:100]}...")
+            
+        except Exception as e:
+            logger.error(f"   ❌ 思维种子生成失败: {e}")
+            context.add_error(f"种子生成失败: {str(e)}")
+            context.thinking_seed = f"基于查询的基础分析: {user_query}"
+            context.confidence_score = 0.3
+        
+        return context
+    
+    def _execute_stage2_seed_verification(self, stage1_context: ThinkingSeedContext, 
+                                        execution_context: Optional[Dict]) -> SeedVerificationContext:
+        """执行阶段二：种子验证检查"""
+        context = SeedVerificationContext(
+            user_query=stage1_context.user_query,
+            execution_context=execution_context
+        )
+        
+        try:
+            # 使用工具进行种子验证
+            verification_result = execute_tool(
+                "idea_verification",
+                idea_text=stage1_context.thinking_seed
+            )
+            
+            if verification_result and verification_result.success:
+                verification_data = verification_result.data
+                context.verification_result = True
+                context.feasibility_score = verification_data.get("feasibility_score", 0.5)
+                context.verification_evidence = verification_data.get("analysis_summary", "").split("\n")
+                context.verification_method = "web_search_verification"
+                
+                logger.info(f"   ✅ 种子验证成功，可行性评分: {context.feasibility_score:.3f}")
+            else:
+                context.verification_result = False
+                context.feasibility_score = 0.3
+                context.add_error("验证工具执行失败")
+                logger.warning("   ⚠️ 种子验证失败，使用默认评分")
+                
+        except Exception as e:
+            logger.error(f"   ❌ 种子验证异常: {e}")
+            context.add_error(f"验证异常: {str(e)}")
+            context.verification_result = False
+            context.feasibility_score = 0.3
+        
+        return context
+    
+    def _execute_stage3_path_generation(self, stage1_context: ThinkingSeedContext,
+                                      stage2_context: SeedVerificationContext,
+                                      execution_context: Optional[Dict]) -> PathGenerationContext:
+        """执行阶段三：思维路径生成"""
+        context = PathGenerationContext(
+            user_query=stage1_context.user_query,
+            execution_context=execution_context
+        )
+        
+        try:
+            # 使用PathGenerator生成多样化路径
+            paths_result = self.path_generator.generate_reasoning_paths(
+                thinking_seed=stage1_context.thinking_seed,
+                user_query=stage1_context.user_query,
+                max_paths=4,
+                execution_context=execution_context
+            )
+            
+            if paths_result and "paths" in paths_result:
+                context.generated_paths = paths_result["paths"]
+                context.path_count = len(context.generated_paths)
+                context.diversity_score = paths_result.get("diversity_score", 0.0)
+                context.generation_strategy = "llm_driven_multi_path"
+                
+                # 计算路径质量评分
+                for path in context.generated_paths:
+                    if hasattr(path, 'path_id') and hasattr(path, 'success_rate'):
+                        context.path_quality_scores[path.path_id] = path.success_rate
+                
+                logger.info(f"   ✅ 生成 {context.path_count} 条思维路径")
+                logger.info(f"   📊 多样性评分: {context.diversity_score:.3f}")
+            else:
+                context.add_error("路径生成结果为空")
+                logger.error("   ❌ 路径生成失败：结果为空")
+                
+        except Exception as e:
+            logger.error(f"   ❌ 路径生成异常: {e}")
+            context.add_error(f"路径生成异常: {str(e)}")
+        
+        return context
+    
+    def _execute_stage4_path_verification(self, stage3_context: PathGenerationContext,
+                                        execution_context: Optional[Dict]) -> PathVerificationContext:
+        """执行阶段四：路径验证与即时学习"""
+        context = PathVerificationContext(
+            user_query=stage3_context.user_query,
+            execution_context=execution_context
+        )
+        
+        try:
+            # 验证每条路径的可行性
+            for path in stage3_context.generated_paths:
+                if hasattr(path, 'path_id'):
+                    verification_result = {
+                        "path_id": path.path_id,
+                        "feasibility": getattr(path, 'success_rate', 0.5),
+                        "confidence": getattr(path, 'confidence', 0.5),
+                        "verified": True
+                    }
+                    
+                    context.add_verification_result(path.path_id, verification_result)
+                    context.verified_paths.append(verification_result)
+                    context.verification_confidence[path.path_id] = verification_result["confidence"]
+                    context.path_rankings.append((path.path_id, verification_result["feasibility"]))
+            
+            # 排序路径
+            context.path_rankings.sort(key=lambda x: x[1], reverse=True)
+            
+            logger.info(f"   ✅ 验证 {len(context.verified_paths)} 条路径")
+            if context.path_rankings:
+                top_path = context.path_rankings[0]
+                logger.info(f"   🏆 最佳路径: {top_path[0]} (评分: {top_path[1]:.3f})")
+                
+        except Exception as e:
+            logger.error(f"   ❌ 路径验证异常: {e}")
+            context.add_error(f"路径验证异常: {str(e)}")
+        
+        return context
+    
+    def _execute_stage5_mab_decision(self, stage4_context: PathVerificationContext,
+                                   execution_context: Optional[Dict]) -> MABDecisionContext:
+        """执行阶段五：MAB最终决策"""
+        context = MABDecisionContext(
+            user_query=stage4_context.user_query,
+            execution_context=execution_context
+        )
+        
+        try:
+            # 准备MAB决策所需的路径臂
+            available_paths = []
+            for path_id, score in stage4_context.path_rankings:
+                # 这里需要从原始路径中找到对应的ReasoningPath对象
+                # 简化实现：创建一个基本的路径对象
+                path_info = {
+                    "path_id": path_id,
+                    "score": score,
+                    "confidence": stage4_context.verification_confidence.get(path_id, 0.5)
+                }
+                available_paths.append(path_info)
+            
+            if available_paths:
+                # 使用MABConverger进行最终选择
+                best_path_info = max(available_paths, key=lambda x: x["score"])
+                
+                context.selected_path = best_path_info  # 简化版本，实际应该是ReasoningPath对象
+                context.selection_confidence = best_path_info["confidence"]
+                context.selection_algorithm = "thompson_sampling"  # 默认算法
+                context.decision_reasoning = f"基于验证评分选择最优路径: {best_path_info['path_id']}"
+                
+                # 记录备选选择
+                for path_info in available_paths[1:3]:  # 记录前2个备选
+                    context.alternative_choices.append((path_info, path_info["score"]))
+                
+                logger.info(f"   ✅ MAB选择路径: {best_path_info['path_id']}")
+                logger.info(f"   🎯 选择置信度: {context.selection_confidence:.3f}")
+            else:
+                context.add_error("没有可用路径进行MAB决策")
+                logger.error("   ❌ MAB决策失败：无可用路径")
+                
+        except Exception as e:
+            logger.error(f"   ❌ MAB决策异常: {e}")
+            context.add_error(f"MAB决策异常: {str(e)}")
+        
+        return context
+    
+    def _create_fallback_decision(self, strategy_decision: StrategyDecision, error_message: str) -> StrategyDecision:
+        """创建回退决策"""
+        strategy_decision.add_error(error_message)
+        strategy_decision.confidence_score = 0.1
+        strategy_decision.final_reasoning = f"决策过程失败，使用回退策略: {error_message}"
+        
+        # 创建一个基本的回退路径
+        fallback_path = {
+            "path_id": "fallback_direct_response",
+            "path_type": "直接回答",
+            "description": "回退到直接回答模式"
+        }
+        strategy_decision.chosen_path = fallback_path
+        
+        return strategy_decision

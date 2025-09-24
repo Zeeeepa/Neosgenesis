@@ -34,6 +34,8 @@ class LLMProvider(Enum):
     TOGETHER_AI = "together"
     COHERE = "cohere"
     GOOGLE = "google"
+    GEMINI = "gemini"
+    GEMINI_OPENAI = "gemini_openai"
     GROQ = "groq"
 
 
@@ -518,6 +520,35 @@ def create_error_response(provider: str, error_type: LLMErrorType,
         provider=provider,
         error_type=error_type,
         error_message=error_message,
+        **kwargs
+    )
+
+
+def create_success_response(provider: str, model: str, content: str,
+                           usage: Optional[LLMUsage] = None,
+                           response_time: float = 0.0,
+                           **kwargs) -> LLMResponse:
+    """
+    创建成功响应的便捷函数
+    
+    Args:
+        provider: 提供商名称
+        model: 模型名称
+        content: 响应内容
+        usage: Token使用情况
+        response_time: 响应时间
+        **kwargs: 其他参数
+        
+    Returns:
+        LLMResponse: 成功响应对象
+    """
+    return LLMResponse(
+        success=True,
+        provider=provider,
+        model=model,
+        content=content,
+        usage=usage,
+        response_time=response_time,
         **kwargs
     )
 

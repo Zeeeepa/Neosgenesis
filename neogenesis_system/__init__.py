@@ -30,7 +30,15 @@ from .shared.data_structures import (
     ExecutionContext,
     AgentState,
     ActionStatus,
-    PlanStatus
+    PlanStatus,
+    # 中心化上下文协议数据结构
+    StageContext,
+    ThinkingSeedContext,
+    SeedVerificationContext,
+    PathGenerationContext,
+    PathVerificationContext,
+    MABDecisionContext,
+    StrategyDecision
 )
 
 # 导入框架接口抽象
@@ -90,6 +98,15 @@ __all__ = [
     "AgentState",
     "ActionStatus",
     "PlanStatus",
+    
+    # 中心化上下文协议数据结构
+    "StageContext",
+    "ThinkingSeedContext",
+    "SeedVerificationContext",
+    "PathGenerationContext",
+    "PathVerificationContext",
+    "MABDecisionContext",
+    "StrategyDecision",
     
     # 框架接口抽象
     "BasePlanner",
@@ -153,12 +170,19 @@ def create_system(api_key: str = None, config: dict = None):
     # 创建组件
     prior_reasoner = PriorReasoner(api_key or "")
     
-    # 创建LLM客户端（如果有API密钥）
+    # 创建LLM客户端（智能选择最佳可用客户端）
     llm_client = None
     if api_key:
         try:
-            from .providers.impl.deepseek_client import create_llm_client
-            llm_client = create_llm_client(api_key)
+            # 优先尝试使用LLM管理器来自动选择最佳客户端
+            from .providers.llm_manager import LLMManager
+            llm_manager = LLMManager()
+            if llm_manager.initialized and llm_manager.providers:
+                llm_client = llm_manager
+            else:
+                # 回退到DeepSeek客户端
+                from .providers.impl.deepseek_client import create_llm_client
+                llm_client = create_llm_client(api_key)
         except Exception as e:
             # 静默失败，不在create_system函数中打印错误
             pass
