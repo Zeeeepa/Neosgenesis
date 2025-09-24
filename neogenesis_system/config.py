@@ -422,10 +422,9 @@ LLM_PROVIDERS_CONFIG = {
         "display_name": "Google Gemini",
         "provider_type": "gemini",
         "api_key_env": "GEMINI_API_KEY",
-        "default_model": "gemini-2.0-flash-exp",
+        "default_model": "gemini-2.5-flash",
         "available_models": [
-            "gemini-2.0-flash-exp", "gemini-1.5-flash", "gemini-1.5-flash-8b",
-            "gemini-1.5-pro", "gemini-1.0-pro"
+            "gemini-2.5-flash", "gemini-2.5-pro"
         ],
         "base_url": "https://generativelanguage.googleapis.com",
         "max_tokens": 8192,
@@ -435,7 +434,7 @@ LLM_PROVIDERS_CONFIG = {
         "retry_delay_base": 2.0,
         "request_interval": 0.5,
         "features": ["chat", "function_calling", "multimodal", "json_mode", "fast_inference"],
-        "cost_per_1k_tokens": {"input": 0.000075, "output": 0.0003},  # Gemini 2.0 Flash pricing
+        "cost_per_1k_tokens": {"input": 0.000075, "output": 0.0003},  # Gemini 2.5 Flash pricing
         "context_window": 1048576,  # 1M tokens context window
         "enabled": True  # 默认启用，推荐使用
     },
