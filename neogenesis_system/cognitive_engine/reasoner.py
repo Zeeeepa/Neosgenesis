@@ -182,7 +182,7 @@ class PriorReasoner:
                 from ..providers.impl.gemini_client import create_gemini_client
                 gemini_client = create_gemini_client(
                     api_key=gemini_api_key,
-                    model="gemini-2.0-flash-exp",
+                    model="gemini-2.5-flash",
                     temperature=0.1,  # 分类任务需要确定性
                     max_tokens=1000   # 快速响应
                 )
