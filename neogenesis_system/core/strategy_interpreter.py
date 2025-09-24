@@ -793,12 +793,6 @@ class StrategyInterpreter:
             'suggested_elements': visual_decision.get('suggested_elements', []),
             'analysis_source': 'visual_intelligence_decision_v2'
         }
-                
-        except Exception as e:
-            logger.error(f"❌ 视觉需求分析失败: {e}")
-            visual_analysis = self._fallback_visual_needs_analysis(query)
-        
-        return visual_analysis
     
     def _analyze_output_format_context(self, query: str, context: Dict) -> Dict[str, Any]:
         """📊 分析查询的输出格式需求"""
@@ -1564,4 +1558,5 @@ class ImprovedMockNeogenesisPlanner:
             "name": self.name,
             "total_rounds": 0,
             "strategy_success_stats": self.strategy_success_stats
-        }
+        }   
+        
