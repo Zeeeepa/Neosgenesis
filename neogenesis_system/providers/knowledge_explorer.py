@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict
 import json
+from datetime import datetime
 
 try:
     from .search_tools import WebSearchClient
@@ -476,6 +477,10 @@ class KnowledgeExplorer:
             max_queries = 4  # 低优先级限制查询数量
         
         final_queries = queries[:max_queries]
+        
+        # 最终年份验证 - 确保所有查询使用正确的年份
+        final_queries = self._validate_and_fix_query_years(final_queries)
+        
         logger.debug(f"🔍 最终生成 {len(final_queries)} 个搜索查询 (最大: {max_queries})")
         return final_queries
     
@@ -573,7 +578,7 @@ class KnowledgeExplorer:
                 "{} vs 替代方案", "{} 性能对比"
             ],
             'trend_monitoring': [
-                "{} 最新趋势", "{} 2024发展", "{} 未来方向",
+                "{} 最新趋势", f"{{}} {datetime.now().year}发展", "{} 未来方向",
                 "{} 创新动态", "{} 技术演进"
             ],
             'learning_request': [
@@ -725,6 +730,64 @@ class KnowledgeExplorer:
         
         return queries
     
+    def _validate_and_fix_query_years(self, queries: List[str]) -> List[str]:
+        """
+        🔥 验证并修正查询中的年份，确保使用当前年份
+        
+        Args:
+            queries: 原始查询列表
+            
+        Returns:
+            修正后的查询列表
+        """
+        import re
+        from datetime import datetime
+        
+        current_year = datetime.now().year
+        fixed_queries = []
+        year_pattern = r'20\d{2}年?'
+        
+        time_related_keywords = [
+            '最新', '当前', '今年', '现在', '最近', '新', '发展', '趋势', '动态', '进展',
+            'latest', 'current', 'recent', 'new', 'trend', 'update', 'progress'
+        ]
+        
+        for query in queries:
+            original_query = query
+            modified = False
+            
+            # 1. 替换错误年份
+            years_found = re.findall(year_pattern, query)
+            if years_found:
+                for year_str in years_found:
+                    year_num = int(re.sub(r'[^\d]', '', year_str))
+                    if year_num != current_year:
+                        logger.warning(f"⚠️ [KnowledgeExplorer] 检测到错误年份: {year_str} -> {current_year}年")
+                        query = query.replace(year_str, f"{current_year}年")
+                        modified = True
+            
+            # 2. 为时间相关查询主动添加年份
+            query_lower = query.lower()
+            has_time_context = any(kw in query_lower for kw in time_related_keywords)
+            has_year = bool(re.search(year_pattern, query))
+            
+            if has_time_context and not has_year:
+                logger.info(f"⚠️ [KnowledgeExplorer] 时间相关查询缺少年份，自动添加: {query}")
+                for keyword in time_related_keywords:
+                    if keyword in query_lower:
+                        idx = query_lower.index(keyword)
+                        insert_pos = idx + len(keyword)
+                        query = query[:insert_pos] + f" {current_year}年" + query[insert_pos:]
+                        modified = True
+                        break
+            
+            if modified:
+                logger.info(f"🔧 [KnowledgeExplorer] 修正查询: {original_query} -> {query}")
+            
+            fixed_queries.append(query)
+        
+        return fixed_queries
+    
     def _build_comprehensive_queries(self, keywords: List[str], 
                                    strategy: ExplorationStrategy, 
                                    user_query: str) -> List[str]:
@@ -746,9 +809,10 @@ class KnowledgeExplorer:
                 ])
         
         elif strategy == ExplorationStrategy.TREND_MONITORING:
+            current_year = datetime.now().year
             for keyword in keywords[:2]:
                 queries.extend([
-                    f"{keyword} 2024最新发展趋势",
+                    f"{keyword} {current_year}最新发展趋势",
                     f"{keyword} 未来发展方向预测",
                     f"{keyword} 技术演进路线图",
                     f"{keyword} 创新突破进展"
