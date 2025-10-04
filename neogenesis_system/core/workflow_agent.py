@@ -21,6 +21,7 @@
 import time
 import logging
 from typing import Dict, List, Optional, Any, Union
+from datetime import datetime
 
 # 导入框架核心接口
 try:
@@ -77,8 +78,19 @@ class WorkflowPlanner(BasePlanner):
         self.tool_registry = tool_registry or global_tool_registry
         self.config = config or {}
         
-        # 战略路径到行动的映射规则
-        self.strategy_to_action_rules = {
+        # 🔥 新增：集成StrategyInterpreter - 统一策略解释逻辑
+        self.strategy_interpreter = None
+        try:
+            from .strategy_interpreter import StrategyInterpreter
+            self.strategy_interpreter = StrategyInterpreter()
+            logger.info("✅ WorkflowPlanner已集成StrategyInterpreter")
+        except ImportError as e:
+            logger.warning(f"⚠️ StrategyInterpreter导入失败，使用降级策略处理: {e}")
+        except Exception as e:
+            logger.warning(f"⚠️ StrategyInterpreter初始化失败，使用降级策略处理: {e}")
+        
+        # 🔄 保留原有映射规则作为降级方案
+        self.fallback_strategy_rules = {
             'exploratory_investigative': self._handle_exploratory_strategy,
             'critical_questioning': self._handle_critical_strategy,
             'systematic_analytical': self._handle_analytical_strategy,
@@ -94,15 +106,31 @@ class WorkflowPlanner(BasePlanner):
             'successful_conversions': 0,
             'direct_answer_rate': 0.0,
             'avg_action_count': 0.0,
-            'strategy_type_distribution': {}
+            'strategy_type_distribution': {},
+            'strategy_interpreter_usage': 0,
+            'fallback_usage': 0,
+            'visual_decisions_made': 0
         }
         
         logger.info(f"🔧 WorkflowPlanner 初始化完成")
-        logger.info(f"   支持策略类型: {len(self.strategy_to_action_rules)} 种")
+        logger.info(f"   支持策略类型: {len(self.fallback_strategy_rules)} 种")
+        
+        # 🎨 检查StrategyInterpreter的高级功能
+        if self.strategy_interpreter:
+            visual_intelligence_available = hasattr(self.strategy_interpreter, '_perform_visual_intelligence_decision')
+            semantic_analyzer_available = hasattr(self.strategy_interpreter, 'semantic_analyzer') and self.strategy_interpreter.semantic_analyzer
+            
+            logger.info(f"   🎨 视觉智能决策: {'✅' if visual_intelligence_available else '❌'}")
+            logger.info(f"   🔍 语义分析器: {'✅' if semantic_analyzer_available else '❌'}")
+            
+            if visual_intelligence_available:
+                logger.info("   🌟 WorkflowPlanner现在支持视觉内容生成决策")
+            if semantic_analyzer_available:
+                logger.info("   🌟 WorkflowPlanner现在支持高级语义分析")
         
     def create_plan(self, query: str, memory: Any, context: Optional[Dict[str, Any]] = None) -> Plan:
         """
-        基于战略决策创建具体执行计划 - 实现BasePlanner接口
+        基于战略决策创建具体执行计划 - 实现BasePlanner接口 - 🔥 职责分工修复版
         
         Args:
             query: 用户查询（主要用于兼容接口）
@@ -128,6 +156,9 @@ class WorkflowPlanner(BasePlanner):
         
         strategy_decision: StrategyDecision = context['strategy_decision']
         
+        # 🔥 关键修复：保存当前上下文，供转换方法使用
+        self._current_context = context
+        
         try:
             # 🎯 核心转换：从StrategyDecision到Plan
             plan = self._convert_strategy_to_workflow_plan(strategy_decision, query, memory)
@@ -145,6 +176,9 @@ class WorkflowPlanner(BasePlanner):
             
             logger.error(f"❌ 战术规划失败: {e}")
             return self._create_error_plan(query, f"战术规划过程中出现错误: {str(e)}")
+        finally:
+            # 清理上下文
+            self._current_context = {}
     
     def validate_plan(self, plan: Plan) -> bool:
         """
@@ -268,9 +302,13 @@ class WorkflowPlanner(BasePlanner):
     def _convert_strategy_to_workflow_plan(self, strategy_decision: StrategyDecision, 
                                          query: str, memory: Any) -> Plan:
         """
-        核心转换方法：将StrategyDecision转换为Plan
+        核心转换方法：将StrategyDecision转换为Plan - 🔥 职责分工修复版
         
-        🔥 集成了从NeogenesisPlanner迁移的LLM驱动决策逻辑
+        架构修复核心：
+        1. 检查是否标记为"避免重复决策"模式
+        2. 如果是，直接基于五阶段上下文进行转换，不调用LLM重新决策
+        3. 如果不是，保持原有的LLM驱动逻辑（向后兼容）
+        4. 充分利用五阶段上下文，避免信息丢失
         
         Args:
             strategy_decision: 战略决策结果
@@ -314,121 +352,589 @@ class WorkflowPlanner(BasePlanner):
         tactical_thought = "\n".join(tactical_thought_parts)
         
         try:
-            # 🧠 使用LLM作为最终战术决策官（从NeogenesisPlanner迁移的核心逻辑）
-            llm_decision = self._llm_tactical_decision_maker(chosen_path, query, thinking_seed, strategy_decision)
+            # 🔥 核心修复：检查是否应该避免重复LLM决策
+            context = getattr(self, '_current_context', {})
+            avoid_duplicate = context.get('avoid_duplicate_decision', False)
+            conversion_mode = context.get('conversion_mode', 'default')
             
-            if llm_decision.get('needs_tools', False):
-                # LLM判断需要工具，使用LLM推荐的行动
-                actions = llm_decision.get('actions', [])
-                if not actions:
-                    # 如果LLM没有提供具体行动，回退到规则分析
-                    actions = self._analyze_path_actions(chosen_path, query, strategy_decision)
+            if avoid_duplicate or conversion_mode == 'direct_strategy_to_plan':
+                logger.info("🎯 使用直接策略转换模式（避免重复LLM决策）")
                 
-                if actions:
-                    plan = Plan(
-                        thought=llm_decision.get('explanation', tactical_thought),
-                        actions=actions
-                    )
-                else:
-                    # 即使LLM说需要工具，但没有找到合适工具，返回直接回答
-                    plan = Plan(
-                        thought=llm_decision.get('explanation', tactical_thought),
-                        final_answer=llm_decision.get('direct_answer', "抱歉，我无法找到合适的工具来处理您的请求。")
-                    )
-            else:
-                # LLM判断不需要工具，直接返回智能生成的回答
-                plan = Plan(
-                    thought=llm_decision.get('explanation', tactical_thought),
-                    final_answer=llm_decision.get('direct_answer')
+                # 🔥 直接基于五阶段上下文进行智能转换
+                plan = self._direct_strategy_to_plan_conversion(
+                    strategy_decision, query, tactical_thought, chosen_path, path_type
                 )
+                
+                # 添加职责分工标记
+                plan.metadata.update({
+                    'architecture_fix': 'avoided_duplicate_llm_decision',
+                    'conversion_method': 'direct_five_stage_context_based',
+                    'strategic_source': 'neogenesis_planner_complete',
+                    'tactical_source': 'workflow_planner_direct_conversion'
+                })
+                
+                logger.info(f"✅ 直接策略转换完成: {'工具执行' if plan.actions else '直接回答'}")
+                return plan
             
-            # 添加元数据
+            else:
+                logger.info("🧠 使用传统LLM驱动战术决策（向后兼容模式）")
+                
+                # 🧠 使用LLM作为最终战术决策官（保持向后兼容）
+                llm_decision = self._llm_tactical_decision_maker(chosen_path, query, thinking_seed, strategy_decision)
+                
+                if llm_decision.get('needs_tools', False):
+                    # LLM判断需要工具，使用LLM推荐的行动
+                    actions = llm_decision.get('actions', [])
+                    if not actions:
+                        # 如果LLM没有提供具体行动，回退到规则分析
+                        actions = self._analyze_path_actions(chosen_path, query, strategy_decision)
+                    
+                    if actions:
+                        plan = Plan(
+                            thought=llm_decision.get('explanation', tactical_thought),
+                            actions=actions
+                        )
+                    else:
+                        # 即使LLM说需要工具，但没有找到合适工具，返回直接回答
+                        plan = Plan(
+                            thought=llm_decision.get('explanation', tactical_thought),
+                            final_answer=llm_decision.get('direct_answer', "抱歉，我无法找到合适的工具来处理您的请求。")
+                        )
+                else:
+                    # LLM判断不需要工具，直接返回智能生成的回答
+                    plan = Plan(
+                        thought=llm_decision.get('explanation', tactical_thought),
+                        final_answer=llm_decision.get('direct_answer')
+                    )
+                
+                # 添加元数据
+                plan.metadata.update({
+                    'workflow_generation': {
+                        'strategy_decision_id': f"{strategy_decision.round_number}_{strategy_decision.timestamp}",
+                        'chosen_strategy': path_type,
+                        'conversion_method': 'llm_tactical_decision_maker_legacy',
+                        'tactical_reasoning': llm_decision.get('explanation', ''),
+                        'generation_timestamp': time.time(),
+                        'llm_decision': llm_decision
+                    },
+                    'strategic_context': {
+                        'thinking_seed': thinking_seed,
+                        'verification_stats': getattr(strategy_decision, 'verification_stats', {}),
+                        'selection_algorithm': getattr(strategy_decision, 'selection_algorithm', 'unknown')
+                    }
+                })
+                
+                action_count = len(plan.actions) if plan.actions else 0
+                answer_mode = "工具执行" if plan.actions else "直接回答"
+                logger.info(f"🔄 LLM驱动战术决策完成: {answer_mode}, {action_count} 个行动，策略 '{path_type}'")
+                return plan
+            
+        except Exception as e:
+            logger.error(f"❌ 策略转换失败，回退到规则引擎: {e}")
+            
+            # 回退到原有的规则引擎
+            return self._fallback_to_rule_based_conversion(strategy_decision, query, tactical_thought, chosen_path, path_type, str(e))
+    
+    def _direct_strategy_to_plan_conversion(self, strategy_decision: StrategyDecision, query: str, 
+                                          tactical_thought: str, chosen_path: Any, path_type: str) -> Plan:
+        """
+        🔥 新增：直接策略到计划转换（避免重复LLM决策）
+        
+        基于五阶段上下文直接生成执行计划，不进行重复的LLM决策。
+        这是职责分工修复的核心方法。
+        
+        Args:
+            strategy_decision: 完整的五阶段战略决策
+            query: 用户查询
+            tactical_thought: 战术思考过程
+            chosen_path: 选择的路径
+            path_type: 路径类型
+            
+        Returns:
+            Plan: 执行计划
+        """
+        logger.info(f"🎯 执行直接策略转换: {path_type}")
+        
+        try:
+            # 🔥 基于五阶段上下文智能生成行动
+            actions = self._generate_actions_from_five_stage_context(strategy_decision, query, path_type)
+            
+            if actions:
+                # 生成工具执行计划
+                plan = Plan(
+                    thought=tactical_thought + f"\n\n基于五阶段上下文，生成了 {len(actions)} 个具体行动。",
+                    actions=actions
+                )
+                logger.info(f"✅ 生成工具执行计划: {len(actions)} 个行动")
+            else:
+                # 生成直接回答计划
+                direct_answer = self._generate_direct_answer_from_context(strategy_decision, query, path_type)
+                plan = Plan(
+                    thought=tactical_thought + "\n\n基于五阶段上下文，提供直接回答。",
+                    final_answer=direct_answer
+                )
+                logger.info("✅ 生成直接回答计划")
+            
+            # 添加五阶段上下文元数据
             plan.metadata.update({
-                'workflow_generation': {
-                    'strategy_decision_id': f"{strategy_decision.round_number}_{strategy_decision.timestamp}",
-                    'chosen_strategy': chosen_path.path_type,
-                    'conversion_method': 'llm_tactical_decision_maker',
-                    'tactical_reasoning': llm_decision.get('explanation', ''),
-                    'generation_timestamp': time.time(),
-                    'llm_decision': llm_decision
+                'five_stage_context_utilization': {
+                    'stage1_seed_type': getattr(strategy_decision.stage1_context, 'seed_type', 'unknown') if strategy_decision.stage1_context else 'none',
+                    'stage2_feasibility': getattr(strategy_decision.stage2_context, 'feasibility_score', 0.0) if strategy_decision.stage2_context else 0.0,
+                    'stage3_path_count': getattr(strategy_decision.stage3_context, 'path_count', 0) if strategy_decision.stage3_context else 0,
+                    'stage4_verified_paths': len(getattr(strategy_decision.stage4_context, 'verified_paths', [])) if strategy_decision.stage4_context else 0,
+                    'stage5_selection_algorithm': getattr(strategy_decision.stage5_context, 'selection_algorithm', 'unknown') if strategy_decision.stage5_context else 'none'
                 },
-                'strategic_context': {
-                    'thinking_seed': thinking_seed,
-                    'verification_stats': strategy_decision.verification_stats,
-                    'selection_algorithm': strategy_decision.selection_algorithm
-                }
+                'direct_conversion_timestamp': time.time(),
+                'avoided_llm_redecision': True
             })
             
-            action_count = len(plan.actions) if plan.actions else 0
-            answer_mode = "工具执行" if plan.actions else "直接回答"
-            logger.info(f"🔄 LLM驱动战术决策完成: {answer_mode}, {action_count} 个行动，策略 '{chosen_path.path_type}'")
             return plan
             
         except Exception as e:
-            logger.error(f"❌ LLM战术决策失败，回退到规则引擎: {e}")
+            logger.error(f"❌ 直接策略转换失败: {e}")
+            # 回退到基础规则转换
+            return self._basic_rule_based_plan(strategy_decision, query, tactical_thought, path_type, str(e))
+    
+    def _generate_actions_from_five_stage_context(self, strategy_decision: StrategyDecision, 
+                                                query: str, path_type: str) -> List[Action]:
+        """
+        🔥 基于五阶段上下文生成智能行动
+        
+        充分利用五阶段决策的丰富上下文信息，生成精准的工具调用行动。
+        """
+        actions = []
+        
+        try:
+            # 基于阶段二：种子验证结果决定是否需要搜索
+            if strategy_decision.stage2_context:
+                feasibility_score = getattr(strategy_decision.stage2_context, 'feasibility_score', 0.0)
+                verification_result = getattr(strategy_decision.stage2_context, 'verification_result', False)
+                
+                if not verification_result or feasibility_score < 0.6:
+                    logger.info(f"🔍 基于种子验证结果（可行性:{feasibility_score:.2f}）添加搜索行动")
+                    if self._tool_available("web_search"):
+                        search_query = self._generate_context_aware_search_query(strategy_decision, query, path_type)
+                        actions.append(Action(
+                            tool_name="web_search",
+                            tool_input={"query": search_query, "max_results": 5}
+                        ))
             
-            # 回退到原有的规则引擎
-            path_type = chosen_path.path_type.lower()
-            handler = self.strategy_to_action_rules.get(path_type, self.strategy_to_action_rules['default'])
+            # 基于路径类型添加特定工具
+            if path_type.lower() in ['critical_questioning', 'systematic_analytical']:
+                if self._tool_available("idea_verification"):
+                    verification_idea = self._generate_verification_idea_from_context(strategy_decision, query)
+                    actions.append(Action(
+                        tool_name="idea_verification",
+                        tool_input={"idea_text": verification_idea}
+                    ))
             
-            # 调用策略处理器
-            workflow_result = handler(chosen_path, query, strategy_decision, memory)
+            # 基于阶段一：思维种子类型决定额外工具
+            if strategy_decision.stage1_context:
+                seed_type = getattr(strategy_decision.stage1_context, 'seed_type', '')
+                if seed_type == 'rag_enhanced' and self._tool_available("knowledge_query"):
+                    actions.append(Action(
+                        tool_name="knowledge_query",
+                        tool_input={"query": query}
+                    ))
             
-            # 构建最终计划
+            logger.info(f"🎯 基于五阶段上下文生成了 {len(actions)} 个行动")
+            return actions
+            
+        except Exception as e:
+            logger.warning(f"⚠️ 基于五阶段上下文生成行动失败: {e}")
+            return []
+    
+    def _generate_direct_answer_from_context(self, strategy_decision: StrategyDecision, 
+                                           query: str, path_type: str) -> str:
+        """
+        🔥 基于五阶段上下文生成直接回答
+        
+        核心改进：使用LLM生成真实的回答内容，而不是简单拼接上下文信息
+        """
+        try:
+            # 🔥 核心改进：调用LLM生成真实回答
+            logger.info(f"🤖 使用LLM生成直接回答，策略: {path_type}")
+            
+            # 构建包含五阶段上下文的提示词
+            context_parts = []
+            
+            # 添加思维种子信息
+            if strategy_decision.stage1_context:
+                thinking_seed = getattr(strategy_decision.stage1_context, 'thinking_seed', '')
+                if thinking_seed and len(thinking_seed) > 20:
+                    context_parts.append(f"初步分析：{thinking_seed}")
+            
+            # 关键修复：添加验证结果和搜索内容
+            if strategy_decision.stage2_context:
+                feasibility = getattr(strategy_decision.stage2_context, 'feasibility_score', 0)
+                if feasibility > 0:
+                    context_parts.append(f"可行性评分：{feasibility:.2f}")
+                
+                #核心修复：提取搜索结果内容（从verification_sources读取）
+                verification_sources = getattr(strategy_decision.stage2_context, 'verification_sources', [])
+                logger.info(f"尝试从verification_sources提取搜索结果，数量: {len(verification_sources)}")
+                
+                if verification_sources:
+                    search_content_parts = []
+                    logger.info(f"成功提取到 {len(verification_sources)} 个搜索结果源")
+                    for idx, result in enumerate(verification_sources[:5], 1):  # 最多使用前5个结果
+                        # result可能是SearchResult对象或字典
+                        if isinstance(result, dict):
+                            title = result.get('title', '')
+                            snippet = result.get('snippet', '')
+                            url = result.get('url', '')
+                        else:
+                            title = getattr(result, 'title', '')
+                            snippet = getattr(result, 'snippet', '')
+                            url = getattr(result, 'url', '')
+                        
+                        if title and snippet:
+                            search_content_parts.append(f"[来源{idx}] {title}: {snippet[:200]}")
+                            logger.info(f"提取搜索结果 {idx}: {title[:50]}")
+                    
+                    if search_content_parts:
+                        context_parts.append(f"搜索到的最新信息：\n" + "\n".join(search_content_parts))
+                        logger.info(f"成功添加 {len(search_content_parts)} 条搜索内容到上下文")
+                else:
+                    logger.warning(f"verification_sources为空，无搜索结果可用")
+                
+                # 添加分析摘要
+                analysis_summary = getattr(strategy_decision.stage2_context, 'analysis_summary', '')
+                if analysis_summary:
+                    context_parts.append(f"分析摘要：{analysis_summary}")
+                    logger.info(f"添加分析摘要到上下文")
+            
+            # 添加路径信息
+            if strategy_decision.stage3_context:
+                path_count = getattr(strategy_decision.stage3_context, 'path_count', 0)
+                if path_count > 0:
+                    context_parts.append(f"生成路径数：{path_count}")
+            
+            # 构建上下文摘要
+            context_summary = "\n".join(context_parts) if context_parts else "基于五阶段智能分析"
+            
+            # 🔥 关键修复：添加当前时间信息
+            from datetime import datetime
+            now = datetime.now()
+            current_year = now.year
+            time_context = f"""
+📅 **当前时间信息**:
+- 当前年份: {current_year}年
+- 当前日期: {now.strftime('%Y年%m月%d日')}
+- ⚠️ **重要提醒**: 你的训练数据可能截止于2024年，但现在是{current_year}年。在回答时请以{current_year}年为准。
+"""
+            
+            # 构建提示词，强调使用搜索结果
+            prompt = f"""用户问题：{query}
+{time_context}
+
+分析策略：{path_type}
+
+上下文信息：
+{context_summary}
+
+**重要提示**：
+- 上下文信息中包含"搜索到的最新信息"部分，这些是通过网络搜索获得的**{current_year}年的实时数据**
+- **你必须优先使用这些搜索到的最新信息来回答问题**，而不是依赖你的训练数据
+- 如果搜索结果与你的训练数据冲突，**以搜索结果为准**，因为它们是最新的
+
+请基于以上分析策略和上下文，**详细、准确地回答用户的问题**。回答应该：
+1. **优先使用搜索结果**: 如果上下文中有"搜索到的最新信息"，必须基于这些信息回答，不要使用你的旧训练数据
+2. **时间意识**: 明确当前是{current_year}年，搜索结果是{current_year}年的最新信息
+3. **引用来源**: 回答时可以提及"根据最新信息"或"根据搜索结果"
+4. 直接回答用户的问题，不要重复策略和上下文信息
+5. 内容丰富、结构清晰
+6. 如果是知识类问题，提供全面的解释
+7. 如果是技术问题，提供具体的解决方案
+8. 语言自然流畅
+
+现在请基于搜索到的最新信息回答用户的问题："""
+
+            # 调用LLM生成真实回答
+            try:
+                # 尝试使用llm_manager
+                if hasattr(self, 'llm_manager') and self.llm_manager:
+                    response = self.llm_manager.generate_response(
+                        prompt=prompt,
+                        temperature=0.7,
+                        max_tokens=2000
+                    )
+                    answer_content = response.get('content', '') if isinstance(response, dict) else str(response)
+                    
+                # 尝试使用deepseek_client（BaseLLMClient接口）
+                elif hasattr(self, 'deepseek_client') and self.deepseek_client:
+                    # DeepSeekClient使用chat_completion方法
+                    response = self.deepseek_client.chat_completion(
+                        messages=prompt,  # 可以直接传字符串
+                        temperature=0.7,
+                        max_tokens=2000
+                    )
+                    # LLMResponse对象有content属性
+                    answer_content = response.content if hasattr(response, 'content') else str(response)
+                    
+                # 尝试使用client（OpenAI兼容）
+                elif hasattr(self, 'client') and self.client:
+                    # 检查是否有chat属性（OpenAI风格）
+                    if hasattr(self.client, 'chat'):
+                        # 修复：使用deepseek-chat而不是默认的gpt-3.5-turbo
+                        model_name = getattr(self, 'model', 'deepseek-chat')
+                        response = self.client.chat.completions.create(
+                            model=model_name,
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.7,
+                            max_tokens=2000
+                        )
+                        answer_content = response.choices[0].message.content
+                    # 如果也是BaseLLMClient接口
+                    elif hasattr(self.client, 'chat_completion'):
+                        response = self.client.chat_completion(
+                            messages=prompt,
+                            temperature=0.7,
+                            max_tokens=2000
+                        )
+                        answer_content = response.content if hasattr(response, 'content') else str(response)
+                    else:
+                        logger.warning("⚠️ client对象没有可识别的API接口")
+                        answer_content = self._generate_fallback_answer(query, strategy_decision, path_type)
+                    
+                else:
+                    # 没有可用的LLM客户端，使用回退方案
+                    logger.warning("⚠️ 没有可用的LLM客户端，使用回退方案")
+                    answer_content = self._generate_fallback_answer(query, strategy_decision, path_type)
+                
+                # 如果LLM返回了有效内容，使用它
+                if answer_content and len(answer_content.strip()) > 50:
+                    logger.info(f"✅ LLM生成回答成功，长度: {len(answer_content)}")
+                    
+                    # 添加策略信息作为元数据（不干扰主要内容）
+                    result = answer_content
+                    
+                    # 可选：添加置信度信息
+                    confidence = strategy_decision.confidence_score
+                    if confidence < 0.6:
+                        result += f"\n\n*注：分析置信度为 {confidence:.1%}，建议结合其他信息源验证。*"
+                    
+                    return result
+                else:
+                    logger.warning("⚠️ LLM返回内容过短，使用回退方案")
+                    return self._generate_fallback_answer(query, strategy_decision, path_type)
+                    
+            except Exception as llm_error:
+                logger.warning(f"⚠️ LLM调用失败: {llm_error}，使用回退方案")
+                return self._generate_fallback_answer(query, strategy_decision, path_type)
+            
+        except Exception as e:
+            logger.warning(f"⚠️ 基于上下文生成直接回答失败: {e}")
+            return self._generate_fallback_answer(query, strategy_decision, path_type)
+    
+    def _generate_fallback_answer(self, query: str, strategy_decision: StrategyDecision, path_type: str) -> str:
+        """
+        回退方案：当LLM不可用时，基于上下文信息生成回答
+        """
+        answer_parts = [f"基于{path_type}策略，我来为您回答「{query}」："]
+        
+        # 利用最终推理
+        if strategy_decision.final_reasoning:
+            answer_parts.append(f"\n{strategy_decision.final_reasoning}")
+        
+        # 利用思维种子
+        if strategy_decision.stage1_context:
+            thinking_seed = getattr(strategy_decision.stage1_context, 'thinking_seed', '')
+            if thinking_seed and len(thinking_seed) > 20:
+                answer_parts.append(f"\n从初步分析来看：{thinking_seed[:200]}...")
+        
+        # 添加置信度信息
+        confidence = strategy_decision.confidence_score
+        if confidence >= 0.8:
+            answer_parts.append(f"\n\n基于完整的五阶段分析（置信度：{confidence:.1%}），我对这个回答很有信心。")
+        elif confidence >= 0.6:
+            answer_parts.append(f"\n\n基于分析结果（置信度：{confidence:.1%}），这个回答应该是可靠的。")
+        else:
+            answer_parts.append(f"\n\n虽然分析置信度不高（{confidence:.1%}），但基于现有信息，这是我能提供的最佳回答。")
+        
+        return '\n'.join(answer_parts)
+    
+    def _generate_context_aware_search_query(self, strategy_decision: StrategyDecision, 
+                                           query: str, path_type: str) -> str:
+        """基于五阶段上下文生成智能搜索查询"""
+        try:
+            # 基础查询
+            enhanced_query = query
+            
+            # 基于思维种子增强
+            if strategy_decision.stage1_context:
+                thinking_seed = getattr(strategy_decision.stage1_context, 'thinking_seed', '')
+                if thinking_seed:
+                    # 提取关键词
+                    import re
+                    keywords = re.findall(r'[a-zA-Z\u4e00-\u9fa5]{4,}', thinking_seed)
+                    if keywords:
+                        enhanced_query += f" {' '.join(keywords[:2])}"
+            
+            # 基于路径类型添加特定关键词
+            if 'analytical' in path_type.lower():
+                enhanced_query += " 分析 研究 数据"
+            elif 'critical' in path_type.lower():
+                enhanced_query += " 争议 问题 风险"
+            elif 'exploratory' in path_type.lower():
+                enhanced_query += " 详细 全面 最新"
+            
+            return enhanced_query.strip()
+            
+        except Exception as e:
+            logger.warning(f"⚠️ 生成上下文感知搜索查询失败: {e}")
+            return query
+    
+    def _generate_verification_idea_from_context(self, strategy_decision: StrategyDecision, query: str) -> str:
+        """基于五阶段上下文生成验证想法"""
+        try:
+            verification_parts = [f"验证关于「{query}」的分析："]
+            
+            if strategy_decision.final_reasoning:
+                verification_parts.append(f"推理结论：{strategy_decision.final_reasoning[:150]}")
+            
+            if strategy_decision.stage1_context:
+                thinking_seed = getattr(strategy_decision.stage1_context, 'thinking_seed', '')
+                if thinking_seed:
+                    verification_parts.append(f"初步分析：{thinking_seed[:100]}")
+            
+            return '\n'.join(verification_parts)
+            
+        except Exception as e:
+            logger.warning(f"⚠️ 生成验证想法失败: {e}")
+            return f"验证关于「{query}」的想法和分析"
+    
+    def _fallback_to_rule_based_conversion(self, strategy_decision: StrategyDecision, query: str,
+                                         tactical_thought: str, chosen_path: Any, path_type: str, 
+                                         error_reason: str) -> Plan:
+        """
+        🔄 回退到基于规则的转换
+        """
+        logger.info(f"🔄 使用规则引擎回退转换: {path_type}")
+        
+        try:
+            # 使用原有的策略处理规则
+            if hasattr(chosen_path, 'path_type'):
+                path_type_key = chosen_path.path_type.lower()
+            else:
+                path_type_key = path_type.lower()
+            
+            handler = self.fallback_strategy_rules.get(path_type_key, self.fallback_strategy_rules.get('default'))
+            
+            if handler:
+                workflow_result = handler(chosen_path, query, strategy_decision, None)
+                
+                plan = Plan(
+                    thought=tactical_thought + f"\n\n使用规则引擎处理（原因：{error_reason}）",
+                    actions=workflow_result.get('actions', []),
+                    final_answer=workflow_result.get('final_answer')
+                )
+                
+                plan.metadata.update({
+                    'conversion_method': 'rule_based_fallback',
+                    'fallback_reason': error_reason,
+                    'rule_handler': handler.__name__
+                })
+                
+                return plan
+            
+        except Exception as e:
+            logger.error(f"❌ 规则引擎回退也失败: {e}")
+        
+        # 最终回退
+        return self._basic_rule_based_plan(strategy_decision, query, tactical_thought, path_type, error_reason)
+    
+    def _basic_rule_based_plan(self, strategy_decision: StrategyDecision, query: str,
+                             tactical_thought: str, path_type: str, error_reason: str) -> Plan:
+        """
+        🔧 基础规则计划（最终回退）
+        """
+        logger.info("🔧 使用基础规则生成计划")
+        
+        # 简单的基于路径类型的行动生成
+        actions = []
+        
+        if path_type.lower() in ['exploratory_investigative', 'systematic_analytical']:
+            if self._tool_available("web_search"):
+                actions.append(Action(
+                    tool_name="web_search",
+                    tool_input={"query": query}
+                ))
+        
+        if actions:
             plan = Plan(
-                thought=tactical_thought,
-                actions=workflow_result.get('actions', []),
-                final_answer=workflow_result.get('final_answer')
+                thought=tactical_thought + f"\n\n使用基础规则生成计划（原因：{error_reason}）",
+                actions=actions
             )
-            
-            # 添加元数据
-            plan.metadata.update({
-                'workflow_generation': {
-                    'strategy_decision_id': f"{strategy_decision.round_number}_{strategy_decision.timestamp}",
-                    'chosen_strategy': chosen_path.path_type,
-                    'conversion_method': handler.__name__ + '_fallback',
-                    'tactical_reasoning': workflow_result.get('reasoning', ''),
-                    'generation_timestamp': time.time(),
-                    'fallback_reason': str(e)
-                },
-                'strategic_context': {
-                    'thinking_seed': thinking_seed,
-                    'verification_stats': strategy_decision.verification_stats,
-                    'selection_algorithm': strategy_decision.selection_algorithm
-                }
-            })
-            
-            return plan
+        else:
+            plan = Plan(
+                thought=tactical_thought + f"\n\n使用基础规则生成直接回答（原因：{error_reason}）",
+                final_answer=f"基于{path_type}策略，我来为您回答「{query}」。{strategy_decision.final_reasoning or '这是一个需要深入思考的问题。'}"
+            )
+        
+        plan.metadata.update({
+            'conversion_method': 'basic_rule_based_final_fallback',
+            'fallback_reason': error_reason
+        })
+        
+        return plan
     
     # 策略处理方法组
     def _handle_exploratory_strategy(self, path: ReasoningPath, query: str, 
                                    decision: StrategyDecision, memory: Any) -> Dict[str, Any]:
-        """处理探索调研型策略"""
-        logger.debug("🔍 处理探索调研型策略")
+        """
+        🔥 增强版：处理探索调研型策略 - 基于五阶段上下文的智能决策
+        """
+        logger.debug("🔍 处理探索调研型策略 - 增强版")
         
-        # 探索型策略通常需要搜索工具
         actions = []
+        reasoning_parts = ["探索调研策略分析："]
         
-        # 生成搜索查询
-        search_query = self._optimize_search_query(query, "探索", path.description)
+        # 🔥 基于五阶段上下文进行智能分析
+        context_analysis = self._analyze_five_stage_context_for_strategy(decision, "exploratory")
+        reasoning_parts.extend(context_analysis['insights'])
         
-        if self._tool_available("web_search"):
-            actions.append(Action(
-                tool_name="web_search",
-                tool_input={"query": search_query}
-            ))
+        # 🔥 智能搜索查询生成
+        if context_analysis['needs_search']:
+            search_queries = self._generate_intelligent_search_queries(query, decision, "exploratory")
+            
+            for i, search_query in enumerate(search_queries[:2]):  # 最多2个搜索
+                if self._tool_available("web_search"):
+                    actions.append(Action(
+                        tool_name="web_search",
+                        tool_input={
+                            "query": search_query,
+                            "max_results": 5 if i == 0 else 3,  # 第一个搜索更多结果
+                            "search_type": "comprehensive" if i == 0 else "focused"
+                        }
+                    ))
+                    reasoning_parts.append(f"- 搜索查询{i+1}: {search_query}")
         
-        # 如果有知识查询工具，也可以使用
-        if self._tool_available("knowledge_query"):
-            actions.append(Action(
-                tool_name="knowledge_query", 
-                tool_input={"query": query}
-            ))
+        # 🔥 基于种子验证结果决定是否需要知识查询
+        if (decision.stage2_context and 
+            getattr(decision.stage2_context, 'feasibility_score', 0.0) < 0.7):
+            if self._tool_available("knowledge_query"):
+                actions.append(Action(
+                    tool_name="knowledge_query",
+                    tool_input={
+                        "query": query,
+                        "context": "exploratory_research",
+                        "depth": "comprehensive"
+                    }
+                ))
+                reasoning_parts.append("- 添加知识库查询以补充信息")
+        
+        # 🔥 智能直接回答生成
+        direct_answer = None
+        if not actions:
+            direct_answer = self._generate_context_aware_exploratory_answer(query, decision, context_analysis)
         
         return {
             'actions': actions,
-            'reasoning': f"探索调研策略: 使用搜索工具获取相关信息",
-            'final_answer': None if actions else f"基于探索调研的角度，我来为您分析「{query}」这个问题..."
+            'reasoning': '\n'.join(reasoning_parts),
+            'final_answer': direct_answer,
+            'context_analysis': context_analysis,
+            'strategy_confidence': context_analysis.get('confidence', 0.7)
         }
     
     def _handle_critical_strategy(self, path: ReasoningPath, query: str, 
@@ -694,10 +1200,100 @@ class WorkflowPlanner(BasePlanner):
             return self._emergency_fallback_decision(chosen_path, query, thinking_seed, strategy_decision)
     
     def _call_llm_for_decision(self, decision_prompt: str) -> Optional[str]:
-        """调用LLM进行决策（统一的LLM调用接口）"""
-        # 尝试多种LLM调用方式
+        """
+        🔥 修复版：调用LLM进行决策（统一的LLM调用接口）
         
-        # 方式1：通过prior_reasoner调用
+        修复问题：
+        1. WorkflowPlanner没有prior_reasoner属性
+        2. 需要从外部注入LLM客户端
+        3. 增强错误处理和回退机制
+        """
+        # 🔥 修复：方式1 - 使用注入的LLM管理器
+        try:
+            if hasattr(self, 'llm_manager') and self.llm_manager:
+                logger.info(f"🔍 使用注入的LLM管理器调用LLM...")
+                llm_response = self.llm_manager.generate_response(
+                    query=decision_prompt,
+                    provider="deepseek",
+                    temperature=0.3,
+                    max_tokens=1000
+                )
+                
+                if llm_response and llm_response.strip():
+                    logger.info("✅ LLM管理器调用成功")
+                    return llm_response.strip()
+        except Exception as e:
+            logger.debug(f"LLM管理器调用失败: {e}")
+        
+        # 🔥 修复：方式2 - 使用注入的DeepSeek客户端
+        try:
+            if hasattr(self, 'deepseek_client') and self.deepseek_client:
+                logger.info(f"🔍 使用注入的DeepSeek客户端...")
+                
+                # 构建消息格式
+                messages = [{"role": "user", "content": decision_prompt}]
+                
+                api_response = self.deepseek_client.chat_completion(
+                    messages=messages,
+                    max_tokens=1000,
+                    temperature=0.3
+                )
+                
+                if hasattr(api_response, 'content') and api_response.content:
+                    logger.info("✅ DeepSeek客户端调用成功")
+                    return api_response.content.strip()
+        except Exception as e:
+            logger.debug(f"DeepSeek客户端调用失败: {e}")
+        
+        # 🔥 修复：方式3 - 使用API密钥直接创建客户端
+        try:
+            api_key = getattr(self, 'api_key', None)
+            if not api_key:
+                # 尝试从配置中获取
+                api_key = self.config.get('api_key')
+            
+            if api_key:
+                logger.info(f"🔍 使用API密钥直接创建DeepSeek客户端...")
+                
+                # 🔥 修复：使用统一的LLMConfig而不是ClientConfig
+                from neogenesis_system.providers.llm_base import LLMConfig, LLMProvider
+                from neogenesis_system.providers.impl.deepseek_client import DeepSeekClient
+                
+                llm_config = LLMConfig(
+                    provider=LLMProvider.DEEPSEEK,
+                    api_key=api_key,
+                    model_name="deepseek-chat",
+                    temperature=0.3,
+                    max_tokens=1000,
+                    base_url="https://api.deepseek.com/v1",
+                    timeout=(60, 300),  # 使用更长的超时时间
+                    max_retries=3,
+                    retry_delay_base=2.0,
+                    enable_cache=False,
+                    enable_metrics=False
+                )
+                
+                direct_client = DeepSeekClient(llm_config)
+                
+                # 构建消息格式
+                messages = [{"role": "user", "content": decision_prompt}]
+                
+                api_response = direct_client.chat_completion(
+                    messages=messages,
+                    max_tokens=1000,
+                    temperature=0.3
+                )
+                
+                if hasattr(api_response, 'content') and api_response.content:
+                    logger.info("✅ 直接DeepSeek客户端调用成功")
+                    return api_response.content.strip()
+                elif hasattr(api_response, 'success') and not api_response.success:
+                    logger.warning(f"⚠️ 直接DeepSeek客户端调用返回失败: {getattr(api_response, 'error_message', '未知错误')}")
+        except Exception as e:
+            logger.debug(f"直接DeepSeek客户端调用失败: {e}")
+            logger.debug(f"   错误详情: {type(e).__name__}: {str(e)}")
+        
+        # 🔥 修复：方式4 - 尝试通过prior_reasoner调用（如果存在）
         try:
             if hasattr(self, 'prior_reasoner') and self.prior_reasoner and hasattr(self.prior_reasoner, 'llm_manager'):
                 logger.info(f"🔍 尝试通过prior_reasoner调用LLM...")
@@ -709,113 +1305,284 @@ class WorkflowPlanner(BasePlanner):
                 )
                 
                 if llm_response and llm_response.strip():
+                    logger.info("✅ prior_reasoner调用成功")
                     return llm_response.strip()
         except Exception as e:
             logger.debug(f"prior_reasoner LLM调用失败: {e}")
         
-        # 方式2：直接调用DeepSeek客户端
+        # 🔥 修复：方式5 - 使用硬编码API密钥作为最后手段
         try:
-            import os
-            api_key = os.getenv('DEEPSEEK_API_KEY') or os.getenv('NEOGENESIS_API_KEY')
+            logger.info("🔍 使用硬编码API密钥作为最后手段...")
+            api_key = os.getenv('DEEPSEEK_API_KEY', '')
             
-            if api_key:
-                logger.info(f"🔍 尝试直接创建DeepSeek客户端...")
-                from neogenesis_system.providers.impl.deepseek_client import DeepSeekClient, ClientConfig
+            # 🔥 修复：使用统一的LLMConfig而不是ClientConfig
+            from neogenesis_system.providers.llm_base import LLMConfig, LLMProvider
+            from neogenesis_system.providers.impl.deepseek_client import DeepSeekClient
+            
+            llm_config = LLMConfig(
+                provider=LLMProvider.DEEPSEEK,
+                api_key=api_key,
+                model_name="deepseek-chat",
+                temperature=0.3,
+                max_tokens=1000,
+                base_url="https://api.deepseek.com/v1",
+                timeout=(60, 300),  # 使用更长的超时时间
+                max_retries=3,
+                retry_delay_base=2.0,
+                enable_cache=False,
+                enable_metrics=False  # 硬编码调用不需要指标
+            )
+            
+            direct_client = DeepSeekClient(llm_config)
+            
+            # 构建消息格式
+            messages = [{"role": "user", "content": decision_prompt}]
+            
+            api_response = direct_client.chat_completion(
+                messages=messages,
+                max_tokens=1000,
+                temperature=0.3
+            )
+            
+            if hasattr(api_response, 'content') and api_response.content:
+                logger.info("✅ 硬编码API密钥调用成功")
+                return api_response.content.strip()
+            elif hasattr(api_response, 'success') and not api_response.success:
+                logger.warning(f"⚠️ 硬编码API密钥调用返回失败: {getattr(api_response, 'error_message', '未知错误')}")
                 
-                client_config = ClientConfig(
-                    api_key=api_key,
-                    model="deepseek-chat",
-                    temperature=0.3,
-                    max_tokens=1000,
-                    enable_cache=False
-                )
-                
-                direct_client = DeepSeekClient(client_config)
-                api_response = direct_client.simple_chat(
-                    prompt=decision_prompt,
-                    max_tokens=1000,
-                    temperature=0.3
-                )
-                
-                # 从APIResponse中提取文本内容
-                llm_response = api_response.content if hasattr(api_response, 'content') else str(api_response)
-                
-                if llm_response and llm_response.strip():
-                    return llm_response.strip()
         except Exception as e:
-            logger.debug(f"直接LLM调用失败: {e}")
+            logger.error(f"❌ 硬编码API密钥调用失败: {e}")
+            logger.debug(f"   错误详情: {type(e).__name__}: {str(e)}")
         
-        return None
+        logger.warning("⚠️ 所有LLM调用方式都失败")
+        logger.warning("⚠️ LLM调用失败，使用智能回退策略")
+        
+        # 🔥 增强版：智能回退决策
+        return self._intelligent_fallback_decision(decision_prompt)
+    
+    def _intelligent_fallback_decision(self, decision_prompt: str) -> Optional[str]:
+        """
+        🔥 新增：智能回退决策 - 当所有LLM调用都失败时的智能处理
+        
+        Args:
+            decision_prompt: 决策提示词
+            
+        Returns:
+            Optional[str]: 回退决策结果
+        """
+        logger.info("🔧 使用智能回退决策策略")
+        
+        try:
+            # 分析决策提示词的类型和内容
+            prompt_lower = decision_prompt.lower()
+            
+            # 基于提示词内容的智能分析
+            if "是否需要使用工具" in decision_prompt or "needs_tools" in prompt_lower:
+                # 工具使用决策
+                if any(keyword in prompt_lower for keyword in ['搜索', 'search', '查找', '验证', '分析']):
+                    logger.info("🔧 智能回退：检测到搜索/分析需求，建议使用工具")
+                    return "是的，建议使用搜索工具来获取相关信息。"
+                else:
+                    logger.info("🔧 智能回退：未检测到明确的工具需求，建议直接回答")
+                    return "不需要，可以基于现有知识直接回答。"
+            
+            elif "选择工具" in decision_prompt or "choose tool" in prompt_lower:
+                # 工具选择决策
+                if "搜索" in prompt_lower or "search" in prompt_lower:
+                    return "web_search"
+                elif "验证" in prompt_lower or "verification" in prompt_lower:
+                    return "idea_verification"
+                else:
+                    return "web_search"  # 默认选择搜索工具
+            
+            elif "生成参数" in decision_prompt or "parameters" in prompt_lower:
+                # 参数生成决策
+                return '{"query": "相关搜索查询", "max_results": 5}'
+            
+            else:
+                # 通用决策回退
+                logger.info("🔧 智能回退：通用决策分析")
+                
+                # 基于关键词的简单决策
+                if any(keyword in prompt_lower for keyword in ['复杂', 'complex', '困难', 'difficult']):
+                    return "这是一个复杂的问题，建议使用多种工具进行深入分析。"
+                elif any(keyword in prompt_lower for keyword in ['简单', 'simple', '基础', 'basic']):
+                    return "这是一个相对简单的问题，可以直接回答或使用基础工具。"
+                else:
+                    return "建议采用平衡的方法，结合工具使用和直接分析。"
+        
+        except Exception as e:
+            logger.error(f"❌ 智能回退决策失败: {e}")
+            # 最终回退
+            return "由于系统限制，建议采用保守的处理方式。"
     
     def _analyze_path_actions(self, chosen_path: ReasoningPath, query: str, 
                             strategy_decision: StrategyDecision) -> List[Action]:
         """
-        智能路径分析 - 根据选中的思维路径生成具体行动（从NeogenesisPlanner迁移）
+        🔥 统一策略解释 - 使用StrategyInterpreter进行智能路径分析
         
-        这个方法分析chosen_path的特征，判断应该使用什么工具。
+        这个方法现在委托给StrategyInterpreter来处理策略解释，
+        实现了架构统一和功能集成。
         """
-        actions = []
-        path_description = chosen_path.description
+        logger.info("🎯 使用StrategyInterpreter进行统一策略解释")
         
-        # 尝试使用语义分析器（如果可用）
-        if hasattr(self, 'semantic_analyzer') and self.semantic_analyzer and path_description:
+        # 🔥 优先使用StrategyInterpreter
+        if self.strategy_interpreter:
             try:
-                # 分析路径描述和查询内容
-                combined_text = f"{path_description} {query}"
-                analysis_result = self.semantic_analyzer.analyze(
-                    combined_text, 
-                    ['intent_detection', 'domain_classification']
+                # 构建决策上下文
+                decision_context = {
+                    'strategy_decision': strategy_decision,
+                    'workflow_planner_context': True,
+                    'tool_registry': self.tool_registry,
+                    'config': self.config
+                }
+                
+                # 获取MAB置信度
+                mab_confidence = getattr(strategy_decision, 'confidence_score', 0.7)
+                
+                # 🎯 调用StrategyInterpreter的核心方法
+                actions = self.strategy_interpreter.interpret_strategy_to_actions(
+                    chosen_path=chosen_path,
+                    query=query,
+                    mab_confidence=mab_confidence,
+                    decision_context=decision_context
                 )
                 
-                # 基于意图分析生成行动
-                if 'intent_detection' in analysis_result.analysis_results:
-                    intent_result = analysis_result.analysis_results['intent_detection'].result
-                    primary_intent = intent_result.get('primary_intent', '').lower()
-                    
-                    # 🔍 智能工具选择
-                    if any(word in primary_intent for word in ['information', 'search', 'research', 'explore', 'find']):
-                        # 信息搜索需求
-                        search_query = self._extract_search_query(query, chosen_path)
-                        if self._tool_available("web_search"):
-                            actions.append(Action(
-                                tool_name="web_search",
-                                tool_input={"query": search_query}
-                            ))
-                        logger.debug(f"🔍 语义识别为搜索路径: {search_query}")
-                        
-                    elif any(word in primary_intent for word in ['verification', 'validate', 'check', 'confirm', 'verify']):
-                        # 验证需求
-                        idea_to_verify = self._extract_verification_idea(query, chosen_path)
-                        if self._tool_available("idea_verification"):
-                            actions.append(Action(
-                                tool_name="idea_verification",
-                                tool_input={"idea_text": idea_to_verify}
-                            ))
-                        logger.debug(f"🔬 语义识别为验证路径: {idea_to_verify}")
-                        
-                    elif any(word in primary_intent for word in ['analysis', 'analyze', 'evaluate', 'compare', 'assess']):
-                        # 分析需求
-                        if not actions:  # 如果还没有其他行动
-                            search_query = f"关于 {query} 的详细信息和分析"
-                            if self._tool_available("web_search"):
-                                actions.append(Action(
-                                    tool_name="web_search",
-                                    tool_input={"query": search_query}
-                                ))
-                            logger.debug(f"📊 语义识别为分析路径，先搜索信息: {search_query}")
+                # 🔥 更新统计信息
+                self.conversion_stats['strategy_interpreter_usage'] += 1
                 
-                logger.debug("🔍 路径行动语义分析成功")
+                logger.info(f"✅ StrategyInterpreter生成了 {len(actions)} 个行动")
+                return actions
                 
             except Exception as e:
-                logger.warning(f"⚠️ 路径行动语义分析失败: {e}")
+                logger.warning(f"⚠️ StrategyInterpreter调用失败，使用降级策略: {e}")
+                # 继续执行降级逻辑
         else:
-            logger.debug("📝 语义分析器不可用，跳过智能路径分析")
+            logger.warning("⚠️ StrategyInterpreter不可用，使用降级策略处理")
         
-        # 🔧 如果没有识别出任何行动，使用回退方法
+        # 🔄 降级到原有的策略处理逻辑
+        return self._fallback_path_analysis(chosen_path, query, strategy_decision)
+    
+    def _fallback_path_analysis(self, chosen_path: ReasoningPath, query: str, 
+                               strategy_decision: StrategyDecision) -> List[Action]:
+        """
+        🔄 降级策略分析 - 当StrategyInterpreter不可用时使用原有逻辑
+        """
+        actions = []
+        path_description = getattr(chosen_path, 'description', '')
+        path_type = getattr(chosen_path, 'path_type', 'unknown')
+        
+        logger.info(f"🔄 使用降级策略分析: {path_type}")
+        
+        # 🔥 更新降级使用统计
+        self.conversion_stats['fallback_usage'] += 1
+        
+        # 使用原有的策略规则映射
+        if path_type in self.fallback_strategy_rules:
+            try:
+                handler = self.fallback_strategy_rules[path_type]
+                actions = handler(query, chosen_path, strategy_decision)
+            except Exception as e:
+                logger.warning(f"⚠️ 降级策略处理失败: {e}")
+        
+        # 如果还是没有行动，使用最基本的回退
         if not actions:
-            actions.extend(self._generate_fallback_actions(query, chosen_path))
+            actions = self._generate_basic_fallback_actions(query, path_type)
         
         return actions
+    
+    def _generate_basic_fallback_actions(self, query: str, path_type: str) -> List[Action]:
+        """生成最基本的回退行动"""
+        actions = []
+        
+        # 基于路径类型的简单映射
+        if path_type in ['exploratory_investigative', 'systematic_analytical']:
+            if self._tool_available("web_search"):
+                actions.append(Action(
+                    tool_name="web_search",
+                    tool_input={"query": query}
+                ))
+        elif path_type == 'critical_questioning':
+            if self._tool_available("idea_verification"):
+                actions.append(Action(
+                    tool_name="idea_verification", 
+                    tool_input={"idea_text": query}
+                ))
+        
+        return actions
+    
+    def check_visual_generation_opportunity(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        🎨 检查视觉生成机会 - 利用StrategyInterpreter的视觉智能决策
+        
+        这是WorkflowPlanner对外提供的视觉智能接口，
+        让其他组件可以利用集成的StrategyInterpreter进行视觉决策。
+        
+        Args:
+            query: 用户查询
+            context: 决策上下文
+            
+        Returns:
+            Dict: 视觉决策结果
+        """
+        if not self.strategy_interpreter:
+            return {
+                'should_generate': False,
+                'decision_reason': 'StrategyInterpreter不可用',
+                'source': 'workflow_planner_fallback'
+            }
+        
+        try:
+            # 调用StrategyInterpreter的视觉智能决策
+            visual_decision = self.strategy_interpreter._perform_visual_intelligence_decision(
+                query=query, 
+                context=context or {}
+            )
+            
+            # 添加WorkflowPlanner的上下文信息
+            visual_decision['source'] = 'strategy_interpreter_via_workflow_planner'
+            visual_decision['integration_timestamp'] = time.time()
+            
+            # 🔥 更新视觉决策统计
+            self.conversion_stats['visual_decisions_made'] += 1
+            
+            logger.info(f"🎨 视觉智能决策: {visual_decision['should_generate']} - {visual_decision['decision_reason']}")
+            
+            return visual_decision
+            
+        except Exception as e:
+            logger.error(f"❌ 视觉智能决策失败: {e}")
+            return {
+                'should_generate': False,
+                'decision_reason': f'视觉智能决策异常: {str(e)}',
+                'source': 'workflow_planner_error_fallback'
+            }
+    
+    def get_strategy_interpreter_capabilities(self) -> Dict[str, bool]:
+        """
+        🔍 获取集成的StrategyInterpreter的能力清单
+        
+        Returns:
+            Dict: 能力清单
+        """
+        capabilities = {
+            'strategy_interpreter_available': self.strategy_interpreter is not None,
+            'visual_intelligence': False,
+            'semantic_analysis': False,
+            'advanced_strategy_mapping': False,
+            'output_format_analysis': False
+        }
+        
+        if self.strategy_interpreter:
+            capabilities.update({
+                'visual_intelligence': hasattr(self.strategy_interpreter, '_perform_visual_intelligence_decision'),
+                'semantic_analysis': (hasattr(self.strategy_interpreter, 'semantic_analyzer') and 
+                                    self.strategy_interpreter.semantic_analyzer is not None),
+                'advanced_strategy_mapping': hasattr(self.strategy_interpreter, 'strategy_feature_mappings'),
+                'output_format_analysis': hasattr(self.strategy_interpreter, '_analyze_output_format_context')
+            })
+        
+        return capabilities
     
     def _extract_search_query(self, original_query: str, path: ReasoningPath) -> str:
         """从原始查询和路径信息中提取搜索查询（从NeogenesisPlanner迁移）"""
@@ -905,8 +1672,8 @@ class WorkflowPlanner(BasePlanner):
 🎯 **最终选择的策略**
 策略类型: {chosen_path.path_type}
 策略描述: {chosen_path.description}
-决策置信度: {strategy_context.confidence_score:.3f}
-最终推理: {strategy_context.final_reasoning}
+决策置信度: {float(getattr(strategy_context, 'confidence_score', 0.0)):.3f}
+最终推理: {self._safe_str_truncate(getattr(strategy_context, 'final_reasoning', ''), 300)}
 
 🔧 **可用工具详细规范**
 {detailed_tools_info if detailed_tools_info else "暂无可用工具"}
@@ -990,7 +1757,7 @@ class WorkflowPlanner(BasePlanner):
                     'query': {
                         'type': 'string',
                         'description': '搜索查询字符串，应该基于上下文分析生成精准的搜索词',
-                        'examples': ['AI系统架构设计最佳实践', '微服务架构 2024年最新趋势']
+                        'examples': ['AI系统架构设计最佳实践', f'微服务架构 {datetime.now().year}年最新趋势']
                     },
                     'max_results': {
                         'type': 'integer', 
@@ -1150,7 +1917,7 @@ class WorkflowPlanner(BasePlanner):
 - 推荐分析: 对比分析各路径的特点""")
         
         # 基于最终策略类型 - 🔥 修复：支持中文策略类型
-        strategy_type = strategy_context.chosen_path.get('path_type', '').lower() if strategy_context.chosen_path else ''
+        strategy_type = getattr(strategy_context.chosen_path, 'path_type', '').lower() if strategy_context.chosen_path else ''
         
         if 'exploratory' in strategy_type or 'investigative' in strategy_type or '探索' in strategy_type or '调研' in strategy_type:
             if 'web_search' in available_tools or 'search_knowledge' in available_tools:
@@ -1210,6 +1977,28 @@ class WorkflowPlanner(BasePlanner):
         
         return "\n".join(suggestions)
     
+    def _safe_str(self, value, default: str = "未知") -> str:
+        """安全地将值转换为字符串"""
+        if value is None:
+            return default
+        try:
+            return str(value)
+        except Exception:
+            return default
+    
+    def _safe_str_truncate(self, value, max_length: int, default: str = "无") -> str:
+        """安全地将值转换为字符串并截取"""
+        try:
+            if value is None:
+                return default
+            
+            str_value = str(value)
+            if len(str_value) > max_length:
+                return str_value[:max_length] + "..."
+            return str_value
+        except Exception:
+            return default
+    
     def _build_five_stage_context_summary(self, strategy_context: StrategyDecision) -> str:
         """
         🔥 核心新增方法：构建五阶段决策流程的上下文摘要
@@ -1225,99 +2014,189 @@ class WorkflowPlanner(BasePlanner):
         """
         context_parts = []
         
-        # 阶段一：思维种子生成
-        if strategy_context.stage1_context:
-            stage1 = strategy_context.stage1_context
-            context_parts.append(f"""
+        try:
+            # 阶段一：思维种子生成
+            if strategy_context.stage1_context:
+                stage1 = strategy_context.stage1_context
+                
+                # 🔧 防御性代码：安全地处理属性访问和字符串截取
+                thinking_seed = self._safe_str_truncate(getattr(stage1, 'thinking_seed', ''), 200)
+                seed_type = self._safe_str(getattr(stage1, 'seed_type', '未知'))
+                generation_method = self._safe_str(getattr(stage1, 'generation_method', '未知'))
+                confidence_score = float(getattr(stage1, 'confidence_score', 0.0))
+                reasoning_process = self._safe_str_truncate(getattr(stage1, 'reasoning_process', ''), 150)
+                
+                context_parts.append(f"""
 🌱 **阶段一：思维种子生成**
-- 种子内容: {stage1.thinking_seed[:200]}{'...' if len(stage1.thinking_seed) > 200 else ''}
-- 种子类型: {stage1.seed_type}
-- 生成方法: {stage1.generation_method}
-- 置信度: {stage1.confidence_score:.3f}
-- 推理过程: {stage1.reasoning_process[:150]}{'...' if len(stage1.reasoning_process) > 150 else ''}""")
-            
-            if stage1.source_information:
-                context_parts.append(f"- 信息源数量: {len(stage1.source_information)} 个")
+- 种子内容: {thinking_seed}
+- 种子类型: {seed_type}
+- 生成方法: {generation_method}
+- 置信度: {confidence_score:.3f}
+- 推理过程: {reasoning_process}""")
+                
+                # 安全地处理信息源
+                source_info = getattr(stage1, 'source_information', None)
+                if source_info and hasattr(source_info, '__len__'):
+                    try:
+                        context_parts.append(f"- 信息源数量: {len(source_info)} 个")
+                    except Exception:
+                        context_parts.append("- 信息源: 有")
         
-        # 阶段二：种子验证
-        if strategy_context.stage2_context:
-            stage2 = strategy_context.stage2_context
-            verification_status = "✅ 通过" if stage2.verification_result else "❌ 未通过"
-            context_parts.append(f"""
+            # 阶段二：种子验证
+            if strategy_context.stage2_context:
+                stage2 = strategy_context.stage2_context
+                
+                # 🔧 防御性代码：安全处理阶段二的属性
+                verification_result = getattr(stage2, 'verification_result', False)
+                verification_status = "✅ 通过" if verification_result else "❌ 未通过"
+                feasibility_score = float(getattr(stage2, 'feasibility_score', 0.0))
+                verification_method = self._safe_str(getattr(stage2, 'verification_method', '未知'))
+                
+                context_parts.append(f"""
 🔍 **阶段二：种子验证**
 - 验证结果: {verification_status}
-- 可行性评分: {stage2.feasibility_score:.3f}
-- 验证方法: {stage2.verification_method}""")
-            
-            if stage2.verification_evidence:
-                evidence_summary = "; ".join(stage2.verification_evidence[:3])
-                context_parts.append(f"- 验证证据: {evidence_summary}")
-            
-            if stage2.identified_risks:
-                risks_summary = "; ".join(stage2.identified_risks[:2])
-                context_parts.append(f"- 识别风险: {risks_summary}")
+- 可行性评分: {feasibility_score:.3f}
+- 验证方法: {verification_method}""")
+                
+                # 安全地处理验证证据
+                verification_evidence = getattr(stage2, 'verification_evidence', None)
+                if verification_evidence and hasattr(verification_evidence, '__iter__'):
+                    try:
+                        evidence_list = list(verification_evidence)[:3]
+                        evidence_summary = "; ".join([self._safe_str(e) for e in evidence_list])
+                        context_parts.append(f"- 验证证据: {evidence_summary}")
+                    except Exception:
+                        context_parts.append("- 验证证据: 有")
+                
+                # 安全地处理识别的风险
+                identified_risks = getattr(stage2, 'identified_risks', None)
+                if identified_risks and hasattr(identified_risks, '__iter__'):
+                    try:
+                        risks_list = list(identified_risks)[:2]
+                        risks_summary = "; ".join([self._safe_str(r) for r in risks_list])
+                        context_parts.append(f"- 识别风险: {risks_summary}")
+                    except Exception:
+                        context_parts.append("- 识别风险: 有")
         
-        # 阶段三：路径生成
-        if strategy_context.stage3_context:
-            stage3 = strategy_context.stage3_context
-            context_parts.append(f"""
+            # 阶段三：路径生成
+            if strategy_context.stage3_context:
+                stage3 = strategy_context.stage3_context
+                
+                # 🔧 防御性代码：安全处理阶段三的属性
+                path_count = int(getattr(stage3, 'path_count', 0))
+                generation_strategy = self._safe_str(getattr(stage3, 'generation_strategy', '未知'))
+                diversity_score = float(getattr(stage3, 'diversity_score', 0.0))
+                
+                context_parts.append(f"""
 🛤️ **阶段三：多路径生成**
-- 生成路径数: {stage3.path_count}
-- 生成策略: {stage3.generation_strategy}
-- 多样性评分: {stage3.diversity_score:.3f}""")
+- 生成路径数: {path_count}
+- 生成策略: {generation_strategy}
+- 多样性评分: {diversity_score:.3f}""")
+                
+                # 安全地处理路径质量评分
+                path_quality_scores = getattr(stage3, 'path_quality_scores', None)
+                if path_quality_scores and hasattr(path_quality_scores, 'items'):
+                    try:
+                        top_paths = sorted(path_quality_scores.items(), key=lambda x: float(x[1]), reverse=True)[:3]
+                        paths_info = ", ".join([f"{self._safe_str(path)}({float(score):.2f})" for path, score in top_paths])
+                        context_parts.append(f"- 路径质量: {paths_info}")
+                    except Exception:
+                        context_parts.append("- 路径质量: 有评分数据")
             
-            if stage3.path_quality_scores:
-                top_paths = sorted(stage3.path_quality_scores.items(), key=lambda x: x[1], reverse=True)[:3]
-                paths_info = ", ".join([f"{path}({score:.2f})" for path, score in top_paths])
-                context_parts.append(f"- 路径质量: {paths_info}")
-        
-        # 阶段四：路径验证
-        if strategy_context.stage4_context:
-            stage4 = strategy_context.stage4_context
-            context_parts.append(f"""
+            # 阶段四：路径验证
+            if strategy_context.stage4_context:
+                stage4 = strategy_context.stage4_context
+                
+                # 🔧 防御性代码：安全处理阶段四的属性
+                verified_paths = getattr(stage4, 'verified_paths', [])
+                verified_count = 0
+                try:
+                    verified_count = len(verified_paths) if hasattr(verified_paths, '__len__') else 0
+                except Exception:
+                    verified_count = 0
+                
+                context_parts.append(f"""
 ✅ **阶段四：路径验证**
-- 验证路径数: {len(stage4.verified_paths)}""")
+- 验证路径数: {verified_count}""")
+                
+                # 安全地处理路径排名
+                path_rankings = getattr(stage4, 'path_rankings', None)
+                if path_rankings and hasattr(path_rankings, '__iter__'):
+                    try:
+                        top_rankings = list(path_rankings)[:3]
+                        rankings_info = ", ".join([f"{self._safe_str(path)}({float(score):.2f})" for path, score in top_rankings])
+                        context_parts.append(f"- 路径排名: {rankings_info}")
+                    except Exception:
+                        context_parts.append("- 路径排名: 有排名数据")
+                
+                # 安全地处理被拒绝的路径
+                rejected_paths = getattr(stage4, 'rejected_paths', None)
+                if rejected_paths and hasattr(rejected_paths, '__len__'):
+                    try:
+                        rejected_count = len(rejected_paths)
+                        context_parts.append(f"- 被拒绝路径: {rejected_count} 个")
+                    except Exception:
+                        context_parts.append("- 被拒绝路径: 有")
             
-            if stage4.path_rankings:
-                top_rankings = stage4.path_rankings[:3]
-                rankings_info = ", ".join([f"{path}({score:.2f})" for path, score in top_rankings])
-                context_parts.append(f"- 路径排名: {rankings_info}")
-            
-            if stage4.rejected_paths:
-                context_parts.append(f"- 被拒绝路径: {len(stage4.rejected_paths)} 个")
-        
-        # 阶段五：MAB决策
-        if strategy_context.stage5_context:
-            stage5 = strategy_context.stage5_context
-            context_parts.append(f"""
+            # 阶段五：MAB决策
+            if strategy_context.stage5_context:
+                stage5 = strategy_context.stage5_context
+                
+                # 🔧 防御性代码：安全处理阶段五的属性
+                selection_algorithm = self._safe_str(getattr(stage5, 'selection_algorithm', '未知'))
+                selection_confidence = float(getattr(stage5, 'selection_confidence', 0.0))
+                decision_reasoning = self._safe_str_truncate(getattr(stage5, 'decision_reasoning', ''), 200)
+                
+                context_parts.append(f"""
 🎯 **阶段五：MAB最终决策**
-- 选择算法: {stage5.selection_algorithm}
-- 选择置信度: {stage5.selection_confidence:.3f}
-- 决策推理: {stage5.decision_reasoning[:200]}{'...' if len(stage5.decision_reasoning) > 200 else ''}""")
+- 选择算法: {selection_algorithm}
+- 选择置信度: {selection_confidence:.3f}
+- 决策推理: {decision_reasoning}""")
+                
+                # 安全地处理黄金模板标记
+                golden_template_used = getattr(stage5, 'golden_template_used', False)
+                if golden_template_used:
+                    context_parts.append("- ✨ 使用了黄金模板 (基于历史成功经验)")
             
-            if stage5.golden_template_used:
-                context_parts.append("- ✨ 使用了黄金模板 (基于历史成功经验)")
-        
-        # 总体决策质量指标
-        if strategy_context.performance_metrics:
-            metrics = strategy_context.performance_metrics
-            context_parts.append(f"""
+            # 总体决策质量指标
+            if strategy_context.performance_metrics:
+                metrics = strategy_context.performance_metrics
+                total_execution_time = float(getattr(strategy_context, 'total_execution_time', 0.0))
+                is_complete = getattr(strategy_context, 'is_complete', False)
+                
+                context_parts.append(f"""
 📊 **决策质量指标**
-- 总执行时间: {strategy_context.total_execution_time:.2f}秒
-- 决策完整性: {'✅ 完整' if strategy_context.is_complete else '⚠️ 部分'}""")
+- 总执行时间: {total_execution_time:.2f}秒
+- 决策完整性: {'✅ 完整' if is_complete else '⚠️ 部分'}""")
+                
+                if isinstance(metrics, dict):
+                    for key, value in metrics.items():
+                        try:
+                            if isinstance(value, (int, float)):
+                                context_parts.append(f"- {key}: {float(value):.3f}")
+                        except Exception:
+                            continue
             
-            if isinstance(metrics, dict):
-                for key, value in metrics.items():
-                    if isinstance(value, (int, float)):
-                        context_parts.append(f"- {key}: {value:.3f}")
-        
-        # 如果没有任何阶段上下文，提供基本信息
-        if not context_parts:
-            context_parts.append(f"""
+            # 如果没有任何阶段上下文，提供基本信息
+            if not context_parts:
+                round_number = int(getattr(strategy_context, 'round_number', 0))
+                timestamp = self._safe_str(getattr(strategy_context, 'timestamp', '未知'))
+                final_reasoning = self._safe_str_truncate(getattr(strategy_context, 'final_reasoning', ''), 200)
+                
+                context_parts.append(f"""
 ⚠️ **简化决策流程**
-- 决策轮次: {strategy_context.round_number}
-- 决策时间: {strategy_context.timestamp}
-- 基础推理: {strategy_context.final_reasoning}""")
+- 决策轮次: {round_number}
+- 决策时间: {timestamp}
+- 基础推理: {final_reasoning}""")
+            
+        except Exception as e:
+            # 如果整个方法出错，提供最基础的信息
+            logger.warning(f"⚠️ 构建五阶段上下文摘要时出现错误: {e}")
+            context_parts = [f"""
+⚠️ **基础决策信息**
+- 用户查询: {self._safe_str_truncate(getattr(strategy_context, 'user_query', ''), 100)}
+- 决策推理: {self._safe_str_truncate(getattr(strategy_context, 'final_reasoning', '无'), 200)}
+- 置信度: {float(getattr(strategy_context, 'confidence_score', 0.0)):.3f}"""]
         
         return "\n".join(context_parts)
     
@@ -1585,16 +2464,256 @@ class WorkflowPlanner(BasePlanner):
         logger.info(f"🔄 回退策略完成: needs_tools={needs_tools}, confidence=0.3")
         return result
     
-    def _generate_tool_input(self, tool_name: str, query: str, path: ReasoningPath) -> Dict[str, Any]:
-        """根据工具名称生成合适的输入参数（从NeogenesisPlanner迁移）"""
+    def _generate_tool_input(self, tool_name: str, query: str, path: ReasoningPath, 
+                           strategy_decision: Optional[StrategyDecision] = None) -> Dict[str, Any]:
+        """
+        🔥 增强版：根据工具名称和五阶段上下文生成智能参数
+        """
+        # 🔥 基于五阶段上下文的智能参数生成
+        if strategy_decision:
+            return self._generate_context_aware_tool_input(tool_name, query, path, strategy_decision)
+        
+        # 回退到基础参数生成
         if tool_name == 'web_search':
-            return {"query": query}
+            return {"query": query, "max_results": 5}
         elif tool_name == 'knowledge_query':
             return {"query": query}
         elif tool_name == 'idea_verification':
             return {"idea_text": f"验证关于'{query}'的想法: {path.description}"}
         else:
             return {"query": query}  # 通用参数
+    
+    def _generate_context_aware_tool_input(self, tool_name: str, query: str, path: ReasoningPath, 
+                                         strategy_decision: StrategyDecision) -> Dict[str, Any]:
+        """
+        🔥 新增：基于五阶段决策上下文生成智能工具参数
+        """
+        try:
+            if tool_name == 'web_search':
+                return self._generate_web_search_params(query, path, strategy_decision)
+            elif tool_name == 'knowledge_query':
+                return self._generate_knowledge_query_params(query, path, strategy_decision)
+            elif tool_name == 'idea_verification':
+                return self._generate_verification_params(query, path, strategy_decision)
+            elif tool_name == 'analyze_text':
+                return self._generate_text_analysis_params(query, path, strategy_decision)
+            elif tool_name == 'generate_image':
+                return self._generate_image_params(query, path, strategy_decision)
+            else:
+                # 通用参数，但仍然基于上下文优化
+                return self._generate_generic_params(tool_name, query, path, strategy_decision)
+                
+        except Exception as e:
+            logger.warning(f"⚠️ 上下文感知参数生成失败: {e}")
+            # 回退到基础参数
+            return {"query": query}
+    
+    def _generate_web_search_params(self, query: str, path: ReasoningPath, 
+                                  strategy_decision: StrategyDecision) -> Dict[str, Any]:
+        """🔥 生成web_search的智能参数"""
+        params = {"query": query}
+        
+        # 基于策略类型调整搜索参数
+        path_type = getattr(path, 'path_type', '').lower()
+        
+        if 'exploratory' in path_type or 'investigative' in path_type:
+            params.update({
+                "max_results": 8,
+                "search_type": "comprehensive",
+                "include_recent": True
+            })
+        elif 'critical' in path_type or 'questioning' in path_type:
+            params.update({
+                "max_results": 5,
+                "search_type": "diverse_perspectives",
+                "include_controversies": True
+            })
+        elif 'analytical' in path_type or 'systematic' in path_type:
+            params.update({
+                "max_results": 6,
+                "search_type": "academic_focused",
+                "include_data": True
+            })
+        else:
+            params["max_results"] = 5
+        
+        # 基于思维种子优化查询
+        if strategy_decision.stage1_context:
+            thinking_seed = getattr(strategy_decision.stage1_context, 'thinking_seed', '')
+            if thinking_seed:
+                # 提取关键词增强查询
+                import re
+                keywords = re.findall(r'[a-zA-Z\u4e00-\u9fa5]{4,}', thinking_seed)
+                if keywords:
+                    enhanced_query = f"{query} {' '.join(keywords[:2])}"
+                    params["query"] = enhanced_query
+        
+        # 基于种子验证结果调整搜索深度
+        if strategy_decision.stage2_context:
+            feasibility_score = getattr(strategy_decision.stage2_context, 'feasibility_score', 0.0)
+            if feasibility_score < 0.6:
+                params["search_depth"] = "deep"
+                params["max_results"] = min(params.get("max_results", 5) + 2, 10)
+        
+        return params
+    
+    def _generate_knowledge_query_params(self, query: str, path: ReasoningPath, 
+                                       strategy_decision: StrategyDecision) -> Dict[str, Any]:
+        """🔥 生成knowledge_query的智能参数"""
+        params = {"query": query}
+        
+        # 基于决策置信度调整查询深度
+        if strategy_decision.confidence_score < 0.7:
+            params.update({
+                "search_depth": "comprehensive",
+                "include_related": True,
+                "max_results": 8
+            })
+        else:
+            params.update({
+                "search_depth": "focused",
+                "max_results": 5
+            })
+        
+        # 基于路径类型添加上下文
+        path_type = getattr(path, 'path_type', '').lower()
+        if 'analytical' in path_type:
+            params["context_type"] = "analytical"
+        elif 'creative' in path_type:
+            params["context_type"] = "creative"
+        elif 'practical' in path_type:
+            params["context_type"] = "practical"
+        
+        return params
+    
+    def _generate_verification_params(self, query: str, path: ReasoningPath, 
+                                    strategy_decision: StrategyDecision) -> Dict[str, Any]:
+        """🔥 生成idea_verification的智能参数"""
+        # 构建基于五阶段上下文的验证内容
+        verification_parts = [f"验证关于「{query}」的以下分析："]
+        
+        # 添加思维种子内容
+        if strategy_decision.stage1_context:
+            thinking_seed = getattr(strategy_decision.stage1_context, 'thinking_seed', '')
+            if thinking_seed:
+                verification_parts.append(f"初步分析：{thinking_seed[:150]}")
+        
+        # 添加最终推理
+        if strategy_decision.final_reasoning:
+            verification_parts.append(f"推理结论：{strategy_decision.final_reasoning[:200]}")
+        
+        # 添加路径描述
+        if hasattr(path, 'description') and path.description:
+            verification_parts.append(f"策略路径：{path.description[:100]}")
+        
+        params = {
+            "idea_text": '\n'.join(verification_parts),
+            "verification_criteria": self._get_verification_criteria(path, strategy_decision),
+            "confidence_threshold": 0.7,
+            "include_counterarguments": True
+        }
+        
+        return params
+    
+    def _generate_text_analysis_params(self, query: str, path: ReasoningPath, 
+                                     strategy_decision: StrategyDecision) -> Dict[str, Any]:
+        """🔥 生成analyze_text的智能参数"""
+        # 构建要分析的文本
+        analysis_text = query
+        
+        # 如果有最终推理，添加到分析文本中
+        if strategy_decision.final_reasoning:
+            analysis_text += f"\n\n相关分析：{strategy_decision.final_reasoning}"
+        
+        params = {
+            "text": analysis_text,
+            "analysis_type": self._determine_analysis_type(path, strategy_decision),
+            "detail_level": "comprehensive" if strategy_decision.confidence_score < 0.7 else "standard",
+            "include_sentiment": True,
+            "include_complexity": True
+        }
+        
+        return params
+    
+    def _generate_image_params(self, query: str, path: ReasoningPath, 
+                             strategy_decision: StrategyDecision) -> Dict[str, Any]:
+        """🔥 生成generate_image的智能参数"""
+        # 基于策略类型和上下文生成图像提示
+        path_type = getattr(path, 'path_type', '').lower()
+        
+        if 'creative' in path_type or 'innovative' in path_type:
+            prompt = f"创意可视化：{query}，风格：现代、创新、富有想象力"
+        elif 'analytical' in path_type or 'systematic' in path_type:
+            prompt = f"信息图表：{query}，风格：专业、清晰、数据驱动"
+        elif 'exploratory' in path_type:
+            prompt = f"探索性图像：{query}，风格：详细、全面、教育性"
+        else:
+            prompt = f"基于查询生成图像：{query}"
+        
+        # 基于思维种子丰富提示
+        if strategy_decision.stage1_context:
+            thinking_seed = getattr(strategy_decision.stage1_context, 'thinking_seed', '')
+            if thinking_seed:
+                # 提取视觉相关的概念
+                import re
+                visual_concepts = re.findall(r'[a-zA-Z\u4e00-\u9fa5]{3,}', thinking_seed)
+                if visual_concepts:
+                    prompt += f"，包含元素：{', '.join(visual_concepts[:3])}"
+        
+        params = {
+            "prompt": prompt,
+            "save_image": True,
+            "image_size": (1024, 1024),
+            "quality": "high" if strategy_decision.confidence_score > 0.7 else "standard"
+        }
+        
+        return params
+    
+    def _generate_generic_params(self, tool_name: str, query: str, path: ReasoningPath, 
+                               strategy_decision: StrategyDecision) -> Dict[str, Any]:
+        """🔥 生成通用工具的智能参数"""
+        params = {"query": query}
+        
+        # 基于决策置信度调整参数
+        if strategy_decision.confidence_score < 0.6:
+            params["detail_level"] = "comprehensive"
+            params["include_context"] = True
+        else:
+            params["detail_level"] = "standard"
+        
+        # 添加策略类型上下文
+        path_type = getattr(path, 'path_type', '')
+        if path_type:
+            params["strategy_context"] = path_type
+        
+        return params
+    
+    def _get_verification_criteria(self, path: ReasoningPath, strategy_decision: StrategyDecision) -> List[str]:
+        """🔥 基于上下文生成验证标准"""
+        criteria = ['feasibility', 'accuracy', 'relevance']
+        
+        path_type = getattr(path, 'path_type', '').lower()
+        if 'analytical' in path_type:
+            criteria.extend(['logical_consistency', 'evidence_quality'])
+        elif 'creative' in path_type:
+            criteria.extend(['novelty', 'creativity', 'practicality'])
+        elif 'critical' in path_type:
+            criteria.extend(['counterarguments', 'bias_detection', 'assumption_validity'])
+        
+        return criteria
+    
+    def _determine_analysis_type(self, path: ReasoningPath, strategy_decision: StrategyDecision) -> str:
+        """🔥 基于上下文确定分析类型"""
+        path_type = getattr(path, 'path_type', '').lower()
+        
+        if 'critical' in path_type or 'questioning' in path_type:
+            return 'critical_analysis'
+        elif 'analytical' in path_type or 'systematic' in path_type:
+            return 'comprehensive_analysis'
+        elif 'creative' in path_type:
+            return 'creative_analysis'
+        else:
+            return 'general_analysis'
     
     def _extract_fallback_from_response(self, response: str, chosen_path: ReasoningPath, 
                                       query: str) -> Dict[str, Any]:
@@ -1811,10 +2930,32 @@ class WorkflowGenerationAgent(BaseAgent):
             'strategy_type_preferences': {}
         }
         
+        # 🔥 新增：保存最后生成的计划，供NeogenesisCompleteAgent获取
+        self.last_generated_plan = None
+        self.last_execution_result = None
+        
+        # 🔥 新增：状态验证和健康检查
+        self.health_status = {
+            'is_healthy': True,
+            'last_health_check': time.time(),
+            'error_count': 0,
+            'consecutive_failures': 0,
+            'max_consecutive_failures': 3,
+            'component_status': {
+                'planner': True,
+                'tool_executor': True,
+                'memory': True
+            }
+        }
+        
+        # 执行初始健康检查
+        self._perform_health_check()
+        
         logger.info(f"🤖 {name} 初始化完成")
         logger.info(f"   工作流规划器: {workflow_planner.name}")
         logger.info(f"   工具执行器: {tool_executor.name}")
         logger.info(f"   记忆模块: {memory.name}")
+        logger.info(f"   健康状态: {'✅ 健康' if self.health_status['is_healthy'] else '❌ 异常'}")
     
     def run(self, query: str, context: Optional[Dict[str, Any]] = None) -> str:
         """
@@ -1833,11 +2974,20 @@ class WorkflowGenerationAgent(BaseAgent):
         try:
             logger.info(f"🚀 WorkflowGenerationAgent 开始处理: {query[:50]}...")
             
-            # 验证战略决策上下文
-            if not context or 'strategy_decision' not in context:
-                error_msg = "WorkflowGenerationAgent需要战略决策上下文"
+            # 🔥 新增：执行预处理健康检查
+            if not self._pre_execution_health_check():
+                error_msg = "WorkflowGenerationAgent健康检查失败，无法执行任务"
                 logger.error(f"❌ {error_msg}")
-                return f"错误: {error_msg}"
+                self._record_failure("health_check_failed")
+                return f"系统错误: {error_msg}"
+            
+            # 🔥 增强：验证战略决策上下文
+            validation_result = self._validate_strategy_decision_context(context)
+            if not validation_result['is_valid']:
+                error_msg = f"战略决策上下文验证失败: {validation_result['error']}"
+                logger.error(f"❌ {error_msg}")
+                self._record_failure("context_validation_failed")
+                return f"输入错误: {error_msg}"
             
             strategy_decision: StrategyDecision = context['strategy_decision']
             self.workflow_stats['strategic_decisions_processed'] += 1
@@ -1845,6 +2995,9 @@ class WorkflowGenerationAgent(BaseAgent):
             # 第一步：使用WorkflowPlanner生成执行计划
             logger.info("📋 第一阶段: 战术规划")
             plan = self.plan_task(query, context)
+            
+            # 🔥 保存生成的计划
+            self.last_generated_plan = plan
             
             if not self.planner.validate_plan(plan):
                 logger.error("❌ 生成的计划未通过验证")
@@ -1885,6 +3038,9 @@ class WorkflowGenerationAgent(BaseAgent):
             execution_time = time.time() - start_time
             self._update_workflow_stats(strategy_decision, plan, execution_time, success=True)
             
+            # 🔥 保存执行结果
+            self.last_execution_result = execution_result
+            
             logger.info(f"✅ WorkflowGenerationAgent 处理完成, 耗时 {execution_time:.3f}s")
             return execution_result
             
@@ -1892,11 +3048,16 @@ class WorkflowGenerationAgent(BaseAgent):
             execution_time = time.time() - start_time
             self._update_workflow_stats(None, None, execution_time, success=False)
             
+            # 🔥 新增：记录失败并更新健康状态
+            self._record_failure("execution_exception", str(e))
+            
             logger.error(f"❌ WorkflowGenerationAgent 处理失败: {e}")
             return f"抱歉，处理您的请求时遇到了问题: {str(e)}"
             
         finally:
             self.is_running = False
+            # 🔥 新增：执行后健康检查
+            self._post_execution_health_check()
     
     def _store_workflow_memory(self, query: str, plan: Plan, strategy_decision: StrategyDecision, 
                              result: str, observations: Optional[List[Observation]] = None):
@@ -1906,8 +3067,8 @@ class WorkflowGenerationAgent(BaseAgent):
             memory_value = {
                 'query': query,
                 'strategy_decision': {
-                    'chosen_strategy': strategy_decision.chosen_path.path_type,
-                    'reasoning': strategy_decision.reasoning,
+                    'chosen_strategy': getattr(strategy_decision.chosen_path, 'path_type', 'unknown') if strategy_decision.chosen_path else 'unknown',
+                    'reasoning': strategy_decision.final_reasoning,
                     'round_number': strategy_decision.round_number
                 },
                 'generated_plan': {
@@ -1927,7 +3088,7 @@ class WorkflowGenerationAgent(BaseAgent):
             
             self.store_memory(memory_key, memory_value, {
                 'type': 'workflow_execution',
-                'strategy_type': strategy_decision.chosen_path.path_type
+                'strategy_type': getattr(strategy_decision.chosen_path, 'path_type', 'unknown') if strategy_decision.chosen_path else 'unknown'
             })
             
             logger.debug(f"💾 工作流记忆已存储: {memory_key}")
@@ -2075,7 +3236,7 @@ class WorkflowGenerationAgent(BaseAgent):
     
     def _create_multimedia_response(self, text_results: List[str], image_results: List[Dict], 
                                   other_results: List[str], query: str, plan: Plan) -> str:
-        """🎨 创建图文并茂的响应"""
+        """🎨 创建图文并茂的响应 - 增强版：支持MCP协议的知识整合"""
         response_parts = []
         
         # 🎨 如果有图像结果，优先展示
@@ -2090,14 +3251,34 @@ class WorkflowGenerationAgent(BaseAgent):
                 image_section = self._format_image_section(img_info, i, len(image_results))
                 response_parts.append(image_section)
         
-        # 📝 添加文本结果
+        # 🧠 MCP协议增强：对文本结果进行智能整合
         if text_results:
-            if image_results:
-                response_parts.append("\n" + "─" * 50)
-                response_parts.append("📝 **相关信息和分析**\n")
+            logger.info(f"🧠 启用MCP协议：基于 {len(text_results)} 个搜索结果进行知识整合")
             
-            for result in text_results:
-                response_parts.append(result)
+            # 调用LLM进行知识整合和智能回答
+            intelligent_answer = self._generate_intelligent_answer_from_search_results(
+                query, text_results, plan
+            )
+            
+            if intelligent_answer:
+                if image_results:
+                    response_parts.append("\n" + "─" * 50)
+                response_parts.append("🧠 **基于搜索结果的智能分析**\n")
+                response_parts.append(intelligent_answer)
+                
+                # 添加参考信息
+                response_parts.append("\n" + "─" * 30)
+                response_parts.append("📚 **参考的搜索结果**\n")
+                for i, result in enumerate(text_results, 1):
+                    response_parts.append(f"**来源 {i}**: {result[:200]}{'...' if len(result) > 200 else ''}")
+            else:
+                # 如果LLM整合失败，回退到原始方式
+                if image_results:
+                    response_parts.append("\n" + "─" * 50)
+                    response_parts.append("📝 **相关信息和分析**\n")
+                
+                for result in text_results:
+                    response_parts.append(result)
         
         # 🔧 添加其他结果
         if other_results:
@@ -2118,6 +3299,126 @@ class WorkflowGenerationAgent(BaseAgent):
             return "执行完成，但未获得具体结果。"
         
         return "\n\n".join(response_parts)
+    
+    def _generate_intelligent_answer_from_search_results(self, query: str, search_results: List[str], plan: Plan) -> Optional[str]:
+        """MCP协议核心：基于搜索结果生成智能回答"""
+        try:
+            # 修复：注入当前时间信息
+            from datetime import datetime
+            now = datetime.now()
+            current_year = now.year
+            current_time_info = f"""
+**关键时间信息** (回答问题时必须参考):
+- 当前年份: {current_year}年
+- 当前日期: {now.strftime('%Y年%m月%d日')}
+- **重要**: 你的训练数据可能截止于2024年，但现在是{current_year}年。以下搜索结果是{current_year}年的最新实时信息，请优先使用这些信息而不是你的训练数据。
+"""
+            
+            # 构建上下文信息
+            context_info = "\n".join([f"搜索结果{i+1}: {result}" for i, result in enumerate(search_results)])
+            
+            # 构建智能整合的prompt
+            integration_prompt = f"""作为Neogenesis智能助手，请基于以下搜索结果为用户提供一个全面、深入的回答。
+{current_time_info}
+
+用户问题：{query}
+
+搜索到的{current_year}年最新相关信息：
+{context_info}
+
+请根据上述搜索结果：
+1. **时间意识**: 明确当前是{current_year}年，搜索结果反映的是{current_year}年的最新情况
+2. **优先使用搜索结果**: 以上搜索结果是{current_year}年的实时信息，比你的训练数据（可能截止2024年）更新，必须优先基于搜索结果回答
+3. 综合分析所有相关信息
+4. 提供一个结构化的、有见地的回答
+5. 确保回答准确、实用，并体现出对搜索内容的深度理解
+6. 如果适合，可以提供具体的建议或行动步骤
+7. 保持专业但友好的语调
+
+**特别强调**: 如果搜索结果中提到的时间是{current_year}年或涉及{current_year}年的信息，请在回答中也使用{current_year}年，而不是默认使用2024年或其他过去的年份。
+
+注意：请严格基于搜索结果进行回答，不要添加搜索结果中没有的信息。如果搜索结果不足以完整回答问题，请明确说明。"""
+
+            # 尝试获取LLM客户端进行智能整合
+            llm_client = self._get_llm_client_for_integration()
+            if not llm_client:
+                logger.warning("⚠️ 无法获取LLM客户端，跳过智能整合")
+                return None
+            
+            # 调用LLM进行智能整合
+            logger.info("🔄 调用LLM进行搜索结果的智能整合...")
+            integration_start_time = time.time()
+            
+            try:
+                # call_api 方法返回字符串内容或在失败时抛出异常
+                response_content = llm_client.call_api(
+                    prompt=integration_prompt,
+                    temperature=0.7,  # 适中的创造性
+                    max_tokens=1500   # 足够的回答长度
+                )
+                
+                integration_time = time.time() - integration_start_time
+                
+                if response_content and response_content.strip():
+                    logger.info(f"✅ MCP智能整合完成，耗时{integration_time:.2f}秒")
+                    return response_content.strip()
+                else:
+                    logger.warning("⚠️ LLM响应为空，使用原始搜索结果")
+                    return None
+                    
+            except Exception as api_error:
+                integration_time = time.time() - integration_start_time
+                logger.warning(f"⚠️ LLM API调用失败，耗时{integration_time:.2f}秒，错误: {api_error}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ 搜索结果智能整合失败: {e}")
+            return None
+    
+    def _get_llm_client_for_integration(self):
+        """获取用于智能整合的LLM客户端"""
+        try:
+            # 尝试使用工作流代理的LLM客户端
+            if hasattr(self, 'planner') and hasattr(self.planner, 'llm_client'):
+                logger.info("🔍 使用工作流代理的LLM客户端")
+                return self.planner.llm_client
+            
+            # 尝试从planner的prior_reasoner获取llm_manager
+            if (hasattr(self, 'planner') and 
+                hasattr(self.planner, 'prior_reasoner') and 
+                hasattr(self.planner.prior_reasoner, 'llm_manager') and
+                self.planner.prior_reasoner.llm_manager):
+                logger.info("🔍 使用prior_reasoner的LLM管理器")
+                return self.planner.prior_reasoner.llm_manager
+            
+            # 🔥 修复：使用统一的LLMConfig创建DeepSeek客户端
+            from ..providers.llm_base import LLMConfig, LLMProvider
+            from ..providers.impl.deepseek_client import DeepSeekClient
+            
+            # 使用硬编码的API密钥（与系统其他部分保持一致）
+            api_key = os.getenv('DEEPSEEK_API_KEY', '')
+            logger.info("🔍 创建新的DeepSeek客户端用于智能整合")
+            
+            llm_config = LLMConfig(
+                provider=LLMProvider.DEEPSEEK,
+                api_key=api_key,
+                model_name="deepseek-chat",
+                base_url="https://api.deepseek.com/v1",
+                timeout=(60, 300),  # 使用更长的超时时间
+                max_retries=3,
+                retry_delay_base=2.0,
+                enable_cache=True,  # 智能整合可以使用缓存
+                enable_metrics=False
+            )
+            
+            llm_client = DeepSeekClient(llm_config)
+            
+            logger.info("✅ DeepSeek客户端创建成功")
+            return llm_client
+            
+        except Exception as e:
+            logger.error(f"❌ 创建LLM客户端失败: {e}")
+            return None
     
     def _generate_image_introduction(self, query: str, image_count: int) -> str:
         """🎨 生成图像介绍文本"""
@@ -2206,13 +3507,503 @@ class WorkflowGenerationAgent(BaseAgent):
             base_status['workflow_success_rate'] = 0.0
         
         return base_status
+    
+    # ==================== 🔥 新增：五阶段上下文智能分析方法 ====================
+    
+    def _analyze_five_stage_context_for_strategy(self, decision: StrategyDecision, strategy_type: str) -> Dict[str, Any]:
+        """
+        🔥 新增：基于五阶段上下文为特定策略类型进行智能分析
+        """
+        analysis = {
+            'needs_search': False,
+            'needs_verification': False,
+            'confidence': 0.5,
+            'insights': [],
+            'recommended_tools': [],
+            'search_depth': 'basic'
+        }
+        
+        try:
+            # 分析阶段一：思维种子
+            if decision.stage1_context:
+                stage1 = decision.stage1_context
+                seed_type = getattr(stage1, 'seed_type', '')
+                seed_confidence = getattr(stage1, 'confidence_score', 0.0)
+                
+                analysis['insights'].append(f"- 思维种子: {seed_type} (置信度: {seed_confidence:.2f})")
+                
+                if seed_type == 'rag_enhanced':
+                    analysis['confidence'] += 0.2
+                    analysis['search_depth'] = 'comprehensive'
+                    analysis['insights'].append("- RAG增强种子，建议深度搜索")
+                elif seed_confidence < 0.6:
+                    analysis['needs_search'] = True
+                    analysis['insights'].append("- 种子置信度较低，需要补充信息")
+            
+            # 分析阶段二：种子验证
+            if decision.stage2_context:
+                stage2 = decision.stage2_context
+                verification_result = getattr(stage2, 'verification_result', False)
+                feasibility_score = getattr(stage2, 'feasibility_score', 0.0)
+                
+                analysis['insights'].append(f"- 种子验证: {'通过' if verification_result else '未通过'} (可行性: {feasibility_score:.2f})")
+                
+                if not verification_result or feasibility_score < 0.6:
+                    analysis['needs_search'] = True
+                    analysis['needs_verification'] = True
+                    analysis['insights'].append("- 验证结果不理想，需要外部信息支持")
+                else:
+                    analysis['confidence'] += 0.1
+            
+            # 分析阶段三：路径生成质量
+            if decision.stage3_context:
+                stage3 = decision.stage3_context
+                path_count = getattr(stage3, 'path_count', 0)
+                diversity_score = getattr(stage3, 'diversity_score', 0.0)
+                
+                analysis['insights'].append(f"- 路径生成: {path_count}条路径 (多样性: {diversity_score:.2f})")
+                
+                if path_count > 3 and diversity_score > 0.7:
+                    analysis['confidence'] += 0.15
+                    analysis['insights'].append("- 高质量路径生成，决策基础良好")
+            
+            # 基于策略类型的特定分析
+            if strategy_type == "exploratory":
+                analysis['needs_search'] = True  # 探索型总是需要搜索
+                analysis['recommended_tools'] = ['web_search', 'knowledge_query']
+                if analysis['search_depth'] == 'basic':
+                    analysis['search_depth'] = 'comprehensive'
+            elif strategy_type == "critical":
+                analysis['needs_verification'] = True
+                analysis['recommended_tools'] = ['idea_verification', 'web_search']
+            elif strategy_type == "analytical":
+                analysis['needs_search'] = True
+                analysis['recommended_tools'] = ['web_search', 'analyze_text']
+                analysis['search_depth'] = 'comprehensive'
+            
+            # 最终置信度调整
+            if decision.confidence_score:
+                analysis['confidence'] = min(1.0, analysis['confidence'] + decision.confidence_score * 0.3)
+            
+            logger.debug(f"🧠 五阶段上下文分析完成: {strategy_type}, 置信度={analysis['confidence']:.2f}")
+            return analysis
+            
+        except Exception as e:
+            logger.warning(f"⚠️ 五阶段上下文分析失败: {e}")
+            return {
+                'needs_search': strategy_type in ['exploratory', 'analytical'],
+                'needs_verification': strategy_type == 'critical',
+                'confidence': 0.3,
+                'insights': [f"- 上下文分析失败，使用{strategy_type}策略默认配置"],
+                'recommended_tools': ['web_search'],
+                'search_depth': 'basic'
+            }
+    
+    def _generate_intelligent_search_queries(self, query: str, decision: StrategyDecision, 
+                                           strategy_type: str) -> List[str]:
+        """
+        🔥 新增：基于五阶段上下文生成智能搜索查询
+        """
+        queries = [query]  # 基础查询
+        
+        try:
+            # 基于思维种子优化查询
+            if decision.stage1_context:
+                thinking_seed = getattr(decision.stage1_context, 'thinking_seed', '')
+                if thinking_seed:
+                    # 提取关键概念
+                    import re
+                    concepts = re.findall(r'[a-zA-Z\u4e00-\u9fa5]{4,}', thinking_seed)
+                    if concepts:
+                        enhanced_query = f"{query} {' '.join(concepts[:3])}"
+                        queries.append(enhanced_query)
+            
+            # 基于策略类型添加特定查询
+            if strategy_type == "exploratory":
+                queries.extend([
+                    f"{query} 详细介绍",
+                    f"{query} 最新发展 趋势"
+                ])
+            elif strategy_type == "critical":
+                queries.extend([
+                    f"{query} 争议 问题",
+                    f"{query} 批评 风险"
+                ])
+            elif strategy_type == "analytical":
+                queries.extend([
+                    f"{query} 分析 研究",
+                    f"{query} 数据 统计"
+                ])
+            
+            # 去重并限制数量
+            unique_queries = list(dict.fromkeys(queries))[:3]
+            
+            logger.debug(f"🔍 生成了 {len(unique_queries)} 个智能搜索查询")
+            return unique_queries
+            
+        except Exception as e:
+            logger.warning(f"⚠️ 智能搜索查询生成失败: {e}")
+            return [query]
+    
+    def _generate_context_aware_exploratory_answer(self, query: str, decision: StrategyDecision, 
+                                                 context_analysis: Dict[str, Any]) -> str:
+        """
+        🔥 新增：生成基于上下文的探索型直接回答
+        """
+        try:
+            answer_parts = [f"基于探索调研的角度，我来为您分析「{query}」："]
+            
+            # 添加基于思维种子的洞察
+            if decision.stage1_context:
+                thinking_seed = getattr(decision.stage1_context, 'thinking_seed', '')
+                if thinking_seed and len(thinking_seed) > 20:
+                    answer_parts.append(f"\n从初步分析来看，{thinking_seed[:200]}...")
+            
+            # 添加基于最终推理的内容
+            if decision.final_reasoning:
+                answer_parts.append(f"\n{decision.final_reasoning}")
+            
+            # 添加置信度和建议
+            confidence = context_analysis.get('confidence', 0.5)
+            if confidence < 0.6:
+                answer_parts.append(f"\n\n由于当前信息有限（置信度：{confidence:.1%}），建议您：")
+                answer_parts.append("1. 提供更多具体背景信息")
+                answer_parts.append("2. 明确您最关心的具体方面")
+                answer_parts.append("3. 如需深入了解，我可以为您搜索最新资料")
+            else:
+                answer_parts.append(f"\n\n基于当前分析（置信度：{confidence:.1%}），希望这个回答对您有帮助。如需更详细信息，请告诉我您想深入了解的具体方面。")
+            
+            return '\n'.join(answer_parts)
+            
+        except Exception as e:
+            logger.warning(f"⚠️ 上下文感知探索型回答生成失败: {e}")
+            return f"基于探索调研的角度，我来为您分析「{query}」这个问题。{decision.final_reasoning or '这是一个值得深入研究的话题。'}"
+    
+    # ==================== 🔥 新增：健康检查和验证方法 ====================
+    
+    def _perform_health_check(self) -> bool:
+        """🔥 执行完整的健康检查"""
+        try:
+            logger.debug("🔍 执行WorkflowGenerationAgent健康检查...")
+            
+            # 检查核心组件
+            planner_ok = self._check_planner_health()
+            executor_ok = self._check_tool_executor_health()
+            memory_ok = self._check_memory_health()
+            
+            # 更新组件状态
+            self.health_status['component_status'].update({
+                'planner': planner_ok,
+                'tool_executor': executor_ok,
+                'memory': memory_ok
+            })
+            
+            # 更新整体健康状态
+            overall_health = planner_ok and executor_ok and memory_ok
+            self.health_status['is_healthy'] = overall_health
+            self.health_status['last_health_check'] = time.time()
+            
+            if overall_health:
+                logger.debug("✅ 健康检查通过")
+                # 重置连续失败计数
+                self.health_status['consecutive_failures'] = 0
+            else:
+                logger.warning("⚠️ 健康检查发现问题")
+            
+            return overall_health
+            
+        except Exception as e:
+            logger.error(f"❌ 健康检查失败: {e}")
+            self.health_status['is_healthy'] = False
+            return False
+    
+    def _check_planner_health(self) -> bool:
+        """检查规划器健康状态"""
+        try:
+            if not self.planner:
+                return False
+            
+            # 检查规划器基本属性
+            if not hasattr(self.planner, 'name') or not hasattr(self.planner, 'create_plan'):
+                return False
+            
+            # 检查工具注册表
+            if hasattr(self.planner, 'tool_registry'):
+                if not self.planner.tool_registry:
+                    logger.debug("⚠️ 规划器缺少工具注册表")
+            
+            return True
+            
+        except Exception as e:
+            logger.debug(f"规划器健康检查失败: {e}")
+            return False
+    
+    def _check_tool_executor_health(self) -> bool:
+        """检查工具执行器健康状态"""
+        try:
+            if not self.tool_executor:
+                return False
+            
+            # 检查执行器基本属性
+            if not hasattr(self.tool_executor, 'name') or not hasattr(self.tool_executor, 'execute_action'):
+                return False
+            
+            # 检查执行器状态（如果有的话）
+            if hasattr(self.tool_executor, 'get_health_status'):
+                executor_health = self.tool_executor.get_health_status()
+                return executor_health.get('is_healthy', True)
+            
+            return True
+            
+        except Exception as e:
+            logger.debug(f"工具执行器健康检查失败: {e}")
+            return False
+    
+    def _check_memory_health(self) -> bool:
+        """检查记忆模块健康状态"""
+        try:
+            if not self.memory:
+                return False
+            
+            # 检查记忆模块基本属性
+            if not hasattr(self.memory, 'name') or not hasattr(self.memory, 'store'):
+                return False
+            
+            # 尝试简单的存储测试
+            test_key = f"health_check_{int(time.time())}"
+            test_value = "health_check_test"
+            
+            if self.memory.store(test_key, test_value):
+                # 清理测试数据
+                if hasattr(self.memory, 'delete'):
+                    self.memory.delete(test_key)
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"记忆模块健康检查失败: {e}")
+            return False
+    
+    def _pre_execution_health_check(self) -> bool:
+        """🔥 执行前健康检查"""
+        # 如果上次检查时间超过5分钟，重新检查
+        if time.time() - self.health_status['last_health_check'] > 300:
+            return self._perform_health_check()
+        
+        # 如果连续失败次数过多，强制重新检查
+        if self.health_status['consecutive_failures'] >= self.health_status['max_consecutive_failures']:
+            logger.warning("🔄 连续失败次数过多，强制健康检查")
+            return self._perform_health_check()
+        
+        return self.health_status['is_healthy']
+    
+    def _post_execution_health_check(self):
+        """🔥 执行后健康检查"""
+        # 简化的后执行检查，主要更新统计信息
+        try:
+            if hasattr(self, 'workflow_stats'):
+                success_rate = (self.workflow_stats['successful_workflows_generated'] / 
+                              max(self.workflow_stats['strategic_decisions_processed'], 1))
+                
+                # 如果成功率过低，标记为不健康
+                if success_rate < 0.3 and self.workflow_stats['strategic_decisions_processed'] > 5:
+                    logger.warning(f"⚠️ 工作流成功率过低: {success_rate:.2%}")
+                    self.health_status['is_healthy'] = False
+                    
+        except Exception as e:
+            logger.debug(f"执行后健康检查失败: {e}")
+    
+    def _validate_strategy_decision_context(self, context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """🔥 验证战略决策上下文"""
+        validation_result = {
+            'is_valid': False,
+            'error': '',
+            'warnings': []
+        }
+        
+        try:
+            # 基本上下文检查
+            if not context:
+                validation_result['error'] = "缺少执行上下文"
+                return validation_result
+            
+            if 'strategy_decision' not in context:
+                validation_result['error'] = "上下文中缺少strategy_decision字段"
+                return validation_result
+            
+            strategy_decision = context['strategy_decision']
+            
+            # 检查StrategyDecision对象
+            if not strategy_decision:
+                validation_result['error'] = "strategy_decision为空"
+                return validation_result
+            
+            # 检查必要属性
+            required_attrs = ['chosen_path', 'confidence_score', 'final_reasoning']
+            missing_attrs = []
+            
+            for attr in required_attrs:
+                if not hasattr(strategy_decision, attr) or getattr(strategy_decision, attr) is None:
+                    missing_attrs.append(attr)
+            
+            if missing_attrs:
+                validation_result['warnings'].append(f"StrategyDecision缺少属性: {', '.join(missing_attrs)}")
+            
+            # 检查chosen_path
+            chosen_path = getattr(strategy_decision, 'chosen_path', None)
+            if chosen_path:
+                if isinstance(chosen_path, dict):
+                    if 'path_type' not in chosen_path:
+                        validation_result['warnings'].append("chosen_path缺少path_type字段")
+                elif not hasattr(chosen_path, 'path_type'):
+                    validation_result['warnings'].append("chosen_path缺少path_type属性")
+            
+            # 检查置信度
+            confidence = getattr(strategy_decision, 'confidence_score', 0.0)
+            if confidence < 0.1:
+                validation_result['warnings'].append(f"决策置信度过低: {confidence:.3f}")
+            
+            # 检查五阶段上下文完整性
+            stage_contexts = ['stage1_context', 'stage2_context', 'stage3_context', 'stage4_context', 'stage5_context']
+            available_stages = []
+            
+            for stage_attr in stage_contexts:
+                if hasattr(strategy_decision, stage_attr) and getattr(strategy_decision, stage_attr):
+                    available_stages.append(stage_attr)
+            
+            if len(available_stages) < 2:
+                validation_result['warnings'].append(f"五阶段上下文信息不足，仅有: {', '.join(available_stages)}")
+            
+            validation_result['is_valid'] = True
+            
+            if validation_result['warnings']:
+                logger.debug(f"上下文验证警告: {'; '.join(validation_result['warnings'])}")
+            
+            return validation_result
+            
+        except Exception as e:
+            validation_result['error'] = f"上下文验证过程中出错: {str(e)}"
+            return validation_result
+    
+    def _record_failure(self, failure_type: str, details: str = ""):
+        """🔥 记录失败并更新健康状态"""
+        try:
+            self.health_status['error_count'] += 1
+            self.health_status['consecutive_failures'] += 1
+            
+            # 如果连续失败次数过多，标记为不健康
+            if self.health_status['consecutive_failures'] >= self.health_status['max_consecutive_failures']:
+                self.health_status['is_healthy'] = False
+                logger.warning(f"⚠️ 连续失败{self.health_status['consecutive_failures']}次，标记为不健康")
+            
+            logger.debug(f"记录失败: {failure_type} - {details}")
+            
+        except Exception as e:
+            logger.error(f"❌ 记录失败信息时出错: {e}")
+    
+    def _record_success(self):
+        """🔥 记录成功并重置失败计数"""
+        try:
+            self.health_status['consecutive_failures'] = 0
+            
+            # 如果之前不健康，重新检查健康状态
+            if not self.health_status['is_healthy']:
+                logger.info("🔄 检测到成功执行，重新评估健康状态")
+                self._perform_health_check()
+                
+        except Exception as e:
+            logger.error(f"❌ 记录成功信息时出错: {e}")
+    
+    def get_health_report(self) -> Dict[str, Any]:
+        """🔥 获取详细的健康报告"""
+        try:
+            # 执行最新的健康检查
+            current_health = self._perform_health_check()
+            
+            report = {
+                'overall_health': current_health,
+                'health_status': self.health_status.copy(),
+                'workflow_stats': self.workflow_stats.copy(),
+                'component_details': {
+                    'planner': {
+                        'healthy': self.health_status['component_status']['planner'],
+                        'name': getattr(self.planner, 'name', 'Unknown') if self.planner else 'None',
+                        'type': type(self.planner).__name__ if self.planner else 'None'
+                    },
+                    'tool_executor': {
+                        'healthy': self.health_status['component_status']['tool_executor'],
+                        'name': getattr(self.tool_executor, 'name', 'Unknown') if self.tool_executor else 'None',
+                        'type': type(self.tool_executor).__name__ if self.tool_executor else 'None'
+                    },
+                    'memory': {
+                        'healthy': self.health_status['component_status']['memory'],
+                        'name': getattr(self.memory, 'name', 'Unknown') if self.memory else 'None',
+                        'type': type(self.memory).__name__ if self.memory else 'None'
+                    }
+                },
+                'recommendations': self._generate_health_recommendations()
+            }
+            
+            return report
+            
+        except Exception as e:
+            logger.error(f"❌ 生成健康报告失败: {e}")
+            return {
+                'overall_health': False,
+                'error': str(e),
+                'recommendations': ['系统出现异常，建议重启WorkflowGenerationAgent']
+            }
+    
+    def _generate_health_recommendations(self) -> List[str]:
+        """🔥 生成健康改进建议"""
+        recommendations = []
+        
+        try:
+            # 基于组件状态生成建议
+            if not self.health_status['component_status']['planner']:
+                recommendations.append("规划器组件异常，建议检查WorkflowPlanner配置")
+            
+            if not self.health_status['component_status']['tool_executor']:
+                recommendations.append("工具执行器异常，建议检查工具注册表和执行器配置")
+            
+            if not self.health_status['component_status']['memory']:
+                recommendations.append("记忆模块异常，建议检查存储后端连接")
+            
+            # 基于统计信息生成建议
+            if self.workflow_stats['strategic_decisions_processed'] > 0:
+                success_rate = (self.workflow_stats['successful_workflows_generated'] / 
+                              self.workflow_stats['strategic_decisions_processed'])
+                
+                if success_rate < 0.5:
+                    recommendations.append(f"工作流成功率较低({success_rate:.1%})，建议检查LLM调用和工具配置")
+                
+                if self.workflow_stats['direct_answer_rate'] > 0.8:
+                    recommendations.append("直接回答率过高，可能需要改进工具选择逻辑")
+            
+            # 基于错误计数生成建议
+            if self.health_status['error_count'] > 10:
+                recommendations.append("错误次数较多，建议检查系统日志并优化错误处理")
+            
+            if self.health_status['consecutive_failures'] > 1:
+                recommendations.append("存在连续失败，建议检查输入数据质量和系统稳定性")
+            
+            if not recommendations:
+                recommendations.append("系统运行正常，建议定期监控性能指标")
+            
+            return recommendations
+            
+        except Exception as e:
+            logger.error(f"❌ 生成健康建议失败: {e}")
+            return ["无法生成健康建议，建议手动检查系统状态"]
 
 
 # 工厂函数：简化WorkflowGenerationAgent的创建
 def create_workflow_agent(tool_executor: Union[BaseToolExecutor, BaseAsyncToolExecutor],
                          memory: BaseMemory,
                          tool_registry: Optional[ToolRegistry] = None,
-                         config: Optional[Dict] = None) -> WorkflowGenerationAgent:
+                         config: Optional[Dict] = None,
+                         api_key: Optional[str] = None) -> WorkflowGenerationAgent:
     """
     工作流代理工厂函数
     
@@ -2221,10 +4012,17 @@ def create_workflow_agent(tool_executor: Union[BaseToolExecutor, BaseAsyncToolEx
         memory: 记忆模块
         tool_registry: 工具注册表
         config: 配置
+        api_key: API密钥（用于LLM调用）
         
     Returns:
         WorkflowGenerationAgent: 配置完成的工作流生成代理
     """
+    # 将API密钥添加到配置中
+    if config is None:
+        config = {}
+    if api_key:
+        config['api_key'] = api_key
+        
     return WorkflowGenerationAgent(
         tool_executor=tool_executor,
         memory=memory,
