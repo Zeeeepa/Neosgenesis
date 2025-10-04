@@ -493,6 +493,18 @@ class ToolRegistry:
         else:
             return [name for name in self._tools.keys() if name not in self._disabled_tools]
     
+    def list_tools(self, include_disabled: bool = False) -> List[str]:
+        """
+        🔥 修复：添加list_tools方法（与list_all_tools功能相同，提供兼容性）
+        
+        Args:
+            include_disabled: 是否包含已禁用的工具
+            
+        Returns:
+            List[str]: 工具名称列表
+        """
+        return self.list_all_tools(include_disabled)
+    
     def search_tools(self, query: str, category: Optional[ToolCategory] = None) -> List[BaseTool]:
         """
         搜索工具（按名称或描述模糊匹配）
@@ -894,8 +906,23 @@ class FunctionTool(BaseTool):
             
             logger.debug(f"🚀 执行函数工具: {self.name}({self.function_name})")
             
+            # 🔥 使用过滤后的参数（如果存在）
+            final_kwargs = getattr(self, '_filtered_kwargs', kwargs)
+            original_kwargs = getattr(self, '_original_kwargs', kwargs)
+            
+            # 如果使用了过滤后的参数，记录日志
+            if hasattr(self, '_filtered_kwargs') and final_kwargs != original_kwargs:
+                filtered_params = set(original_kwargs.keys()) - set(final_kwargs.keys())
+                logger.debug(f"🔧 使用过滤后的参数执行函数，已过滤: {filtered_params}")
+            
             # 🎯 核心：执行原始函数
-            result = self.func(*args, **kwargs)
+            result = self.func(*args, **final_kwargs)
+            
+            # 清理临时存储的过滤参数
+            if hasattr(self, '_filtered_kwargs'):
+                delattr(self, '_filtered_kwargs')
+            if hasattr(self, '_original_kwargs'):
+                delattr(self, '_original_kwargs')
             
             # 智能结果处理：如果函数已返回ToolResult则直接使用，否则自动包装
             if isinstance(result, ToolResult):
@@ -939,10 +966,11 @@ class FunctionTool(BaseTool):
     
     def validate_input(self, *args, **kwargs) -> bool:
         """
-        基于函数签名验证输入参数
+        🔥 增强版：基于函数签名验证输入参数，支持容错处理
         
         这个方法利用Python的inspect模块自动验证参数，
-        开发者无需手动编写验证逻辑
+        开发者无需手动编写验证逻辑。增加了容错机制，
+        自动过滤不支持的参数。
         
         Args:
             *args: 位置参数
@@ -952,14 +980,49 @@ class FunctionTool(BaseTool):
             bool: 输入是否有效
         """
         try:
-            # 使用函数签名绑定和验证参数
+            # 🔥 第一次尝试：直接绑定所有参数
             bound = self.function_signature.bind(*args, **kwargs)
             bound.apply_defaults()
             return True
             
         except TypeError as e:
-            logger.warning(f"⚠️ 函数 {self.function_name} 参数验证失败: {e}")
-            return False
+            # 🔥 容错处理：如果直接绑定失败，尝试过滤不支持的参数
+            error_msg = str(e)
+            if "got an unexpected keyword argument" in error_msg:
+                logger.info(f"🔧 函数 {self.function_name} 收到不支持的参数，尝试自动过滤...")
+                
+                # 获取函数支持的参数名
+                supported_params = set(self.function_signature.parameters.keys())
+                
+                # 过滤kwargs，只保留函数支持的参数
+                filtered_kwargs = {k: v for k, v in kwargs.items() if k in supported_params}
+                
+                # 记录被过滤的参数
+                filtered_params = set(kwargs.keys()) - set(filtered_kwargs.keys())
+                if filtered_params:
+                    logger.info(f"🔧 自动过滤不支持的参数: {filtered_params}")
+                
+                try:
+                    # 🔥 第二次尝试：使用过滤后的参数
+                    bound = self.function_signature.bind(*args, **filtered_kwargs)
+                    bound.apply_defaults()
+                    
+                    # 🔥 重要：更新kwargs以便后续execute方法使用过滤后的参数
+                    # 这里我们需要一个机制来传递过滤后的参数
+                    # 将过滤后的参数存储在实例中，供execute方法使用
+                    self._filtered_kwargs = filtered_kwargs
+                    self._original_kwargs = kwargs
+                    
+                    logger.info(f"✅ 参数过滤成功，函数 {self.function_name} 验证通过")
+                    return True
+                    
+                except TypeError as e2:
+                    logger.warning(f"⚠️ 函数 {self.function_name} 参数过滤后仍然验证失败: {e2}")
+                    return False
+            else:
+                logger.warning(f"⚠️ 函数 {self.function_name} 参数验证失败: {e}")
+                return False
+                
         except Exception as e:
             logger.error(f"❌ 函数 {self.function_name} 参数验证异常: {e}")
             return False
