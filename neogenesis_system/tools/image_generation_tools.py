@@ -158,8 +158,8 @@ class ImageGenerationTool(BaseTool):
         if not prompt or not prompt.strip():
             return ToolResult(
                 success=False,
-                result=None,
-                error="提示词不能为空",
+                data=None,
+                error_message="提示词不能为空",
                 execution_time=0.0
             )
         
@@ -205,8 +205,8 @@ class ImageGenerationTool(BaseTool):
             
             return ToolResult(
                 success=True,
-                result=result_data,
-                error=None,
+                data=result_data,
+                error_message="",
                 execution_time=execution_time
             )
             
@@ -216,8 +216,8 @@ class ImageGenerationTool(BaseTool):
             
             return ToolResult(
                 success=False,
-                result=None,
-                error=f"图像生成失败: {str(e)}",
+                data=None,
+                error_message=f"图像生成失败: {str(e)}",
                 execution_time=execution_time
             )
 
