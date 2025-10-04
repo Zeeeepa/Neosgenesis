@@ -84,8 +84,15 @@ class SemanticAnalyzer:
             llm_manager: LLM管理器实例，如果为None则自动创建
             config: 配置字典，包含分析参数和LLM设置
         """
-        self.llm_manager = llm_manager
         self.config = config or self._get_default_config()
+        
+        # 🔥 修复：如果没有提供LLM管理器，尝试自动创建
+        if llm_manager is not None:
+            self.llm_manager = llm_manager
+            logger.info("🔗 使用外部提供的LLM管理器")
+        else:
+            # 尝试自动创建LLM管理器
+            self.llm_manager = self._create_llm_manager()
         
         # 分析结果缓存
         self.analysis_cache = {}
@@ -104,6 +111,20 @@ class SemanticAnalyzer:
         self.builtin_tasks = self._initialize_builtin_tasks()
         
         logger.info("🔍 SemanticAnalyzer 已初始化")
+    
+    def _create_llm_manager(self):
+        """创建LLM管理器"""
+        try:
+            from ..providers.llm_manager import LLMManager
+            llm_manager = LLMManager()
+            logger.info("🤖 自动创建LLM管理器成功")
+            return llm_manager
+        except ImportError as e:
+            logger.warning(f"⚠️ 无法导入LLMManager: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"⚠️ LLM管理器创建失败: {e}")
+            return None
         
     def _get_default_config(self) -> Dict[str, Any]:
         """获取默认配置"""
@@ -274,6 +295,40 @@ class SemanticAnalyzer:
 - Medium: 建议及时处理，有一定时间要求
 - High: 需要尽快处理，有明确期限
 - Critical: 需要立即处理，延迟会有严重后果
+
+请仅返回JSON，不要其他内容。"""
+        )
+        
+        # 🔑 关键词提取任务
+        tasks['keyword_extraction'] = AnalysisTask(
+            task_type=AnalysisTaskType.KEYWORD_EXTRACTION,
+            description="从文本中提取关键词和技术术语",
+            expected_output_format={
+                "keywords": ["string"],           # 主要关键词
+                "technical_terms": ["string"],   # 技术术语
+                "key_phrases": ["string"],       # 关键短语
+                "entities": ["string"],          # 实体名称
+                "confidence": "float"            # 提取置信度
+            },
+            prompt_template="""请从以下文本中提取关键词和技术术语：
+
+文本: "{text}"
+
+请返回JSON格式的关键词提取结果：
+{{
+    "keywords": ["主要关键词列表，3-5个最重要的词汇"],
+    "technical_terms": ["技术术语列表，包括专业名词、技术概念等"],
+    "key_phrases": ["关键短语列表，2-4个词的重要短语"],
+    "entities": ["实体名称，如人名、地名、产品名、公司名等"],
+    "confidence": 0.0-1.0之间的提取置信度分数
+}}
+
+提取要求：
+- 关键词应该是最能代表文本核心内容的词汇
+- 技术术语包括API、算法、框架、工具等专业概念
+- 关键短语应该是有意义的词组合
+- 实体应该是具体的名称
+- 去除停用词和无意义的词汇
 
 请仅返回JSON，不要其他内容。"""
         )
