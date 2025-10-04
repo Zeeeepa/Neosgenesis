@@ -843,6 +843,86 @@ class LLMDrivenDimensionCreator:
         
         return reasoning_paths
     
+    def _create_enhanced_reasoning_paths_from_analysis(self, dimension_result: Dict[str, Any], 
+                                                     effective_query: str, merged_context: Optional[Dict], 
+                                                     num_dimensions: int) -> List[ReasoningPath]:
+        """
+        基于LLM分析生成思维路径（增强版）
+        
+        Args:
+            dimension_result: LLM维度分析结果
+            effective_query: 有效查询
+            merged_context: 合并的上下文
+            num_dimensions: 维度数量
+            
+        Returns:
+            List[ReasoningPath]: 生成的思维路径列表
+        """
+        try:
+            logger.info(f"🧠 基于增强版LLM分析生成思维路径")
+            
+            # 提取任务分析结果
+            task_analysis = dimension_result.get('task_analysis', {})
+            domain = task_analysis.get('domain', 'general')
+            complexity = task_analysis.get('complexity', 0.5)
+            creativity_required = task_analysis.get('creativity_required', False)
+            
+            reasoning_paths = []
+            
+            # 基于复杂度和创造性需求生成不同的思维路径
+            if creativity_required or complexity > 0.8:
+                # 高复杂度或需要创造性：生成创新路径
+                reasoning_paths.append(ReasoningPath(
+                    path_id=f"enhanced_creative_{domain}_v1",
+                    path_type="创新突破型",
+                    description=f"针对{domain}领域的创新思维路径",
+                    prompt_template="请用创新思维解决：{task}。要求：1) 突破传统思路 2) 寻找新颖角度 3) 提供创造性方案"
+                ))
+                
+                reasoning_paths.append(ReasoningPath(
+                    path_id=f"enhanced_systematic_{domain}_v1", 
+                    path_type="系统分析型",
+                    description=f"针对{domain}领域的系统性分析路径",
+                    prompt_template="请系统性分析：{task}。步骤：1) 问题分解 2) 要素分析 3) 关联梳理 4) 方案构建"
+                ))
+                
+            if complexity < 0.3:
+                # 低复杂度：生成直接路径
+                reasoning_paths.append(ReasoningPath(
+                    path_id=f"enhanced_direct_{domain}_v1",
+                    path_type="直接实用型",
+                    description=f"针对{domain}领域的直接实用路径",
+                    prompt_template="请直接解决：{task}。要求：1) 简洁明了 2) 立即可用 3) 效果明显"
+                ))
+            else:
+                # 中等复杂度：生成平衡路径
+                reasoning_paths.append(ReasoningPath(
+                    path_id=f"enhanced_balanced_{domain}_v1",
+                    path_type="平衡综合型", 
+                    description=f"针对{domain}领域的平衡综合路径",
+                    prompt_template="请综合分析解决：{task}。方法：1) 需求理解 2) 方案评估 3) 优化实施"
+                ))
+            
+            # 总是添加批判性思维路径
+            reasoning_paths.append(ReasoningPath(
+                path_id=f"enhanced_critical_{domain}_v1",
+                path_type="批判分析型",
+                description=f"针对{domain}领域的批判性分析路径",
+                prompt_template="请批判性分析：{task}。要求：1) 质疑基本假设 2) 识别潜在问题 3) 提供改进方案"
+            ))
+            
+            # 限制返回路径数量
+            if len(reasoning_paths) > num_dimensions:
+                reasoning_paths = reasoning_paths[:num_dimensions]
+            
+            logger.info(f"✅ 增强版分析生成 {len(reasoning_paths)} 条思维路径")
+            return reasoning_paths
+            
+        except Exception as e:
+            logger.error(f"❌ 增强版思维路径生成失败: {e}")
+            # 回退到基础版本
+            return self._create_reasoning_paths_from_analysis(dimension_result, effective_query, merged_context)
+
     def _create_fallback_reasoning_paths(self, user_query: str, execution_context: Optional[Dict], error_msg: str) -> List[ReasoningPath]:
         """创建回退思维路径"""
         
@@ -863,6 +943,57 @@ class LLMDrivenDimensionCreator:
                 prompt_template="请提供实用解决方案：{task}。要求：简单可行，立即实施"
             )
         ]
+
+    def _record_dimension_creation(self, query: str, reasoning_paths: List[ReasoningPath], is_retrospective: bool = False):
+        """记录维度创建历史和统计信息"""
+        try:
+            # 记录基本统计
+            creation_record = {
+                "query": query[:100],  # 限制长度避免过长
+                "paths_created": len(reasoning_paths),
+                "is_retrospective": is_retrospective,
+                "timestamp": time.time(),
+                "path_types": [path.path_type for path in reasoning_paths]
+            }
+            
+            # 添加到创建模式历史
+            self.dimension_creation_patterns["all_creations"].append(creation_record)
+            
+            # 更新任务-维度映射
+            query_key = query[:50]  # 使用查询的前50个字符作为键
+            self.task_dimension_mapping[query_key].extend([path.path_id for path in reasoning_paths])
+            
+            # 更新维度使用频率
+            for path in reasoning_paths:
+                self.dimension_usage_frequency[path.path_type] += 1
+                
+                # 存储发现的维度详情
+                self.discovered_dimensions[path.path_type][path.path_id] = {
+                    "description": path.description,
+                    "created_at": time.time(),
+                    "query_context": query_key,
+                    "is_retrospective": is_retrospective
+                }
+            
+            # 更新LLM会话历史
+            session_record = {
+                "query": query_key,
+                "result_count": len(reasoning_paths),
+                "success": True,
+                "timestamp": time.time()
+            }
+            self.llm_session_history.append(session_record)
+            
+            # 限制历史记录长度，避免内存占用过多
+            if len(self.llm_session_history) > 100:
+                self.llm_session_history = self.llm_session_history[-50:]  # 保留最近50条
+            if len(self.dimension_creation_patterns["all_creations"]) > 100:
+                self.dimension_creation_patterns["all_creations"] = self.dimension_creation_patterns["all_creations"][-50:]
+                
+            logger.debug(f"✅ 记录维度创建: {len(reasoning_paths)} 个路径")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ 记录维度创建失败: {e}")
 
 
 class ReasoningPathTemplates:
@@ -1320,6 +1451,102 @@ class PathGenerator:
         self.path_selection_stats = defaultdict(int)
         
         logger.info("🛤️ PathGenerator 已初始化 (支持LLM增强的思维种子→路径生成)")
+    
+    def generate_reasoning_paths(self, thinking_seed: str, user_query: str, max_paths: int = 4, 
+                               execution_context: Optional[Dict] = None) -> Dict[str, Any]:
+        """
+        生成推理路径 - NeogenesisPlanner兼容接口
+        
+        这个方法是为了兼容NeogenesisPlanner中的调用，将generate_paths的结果
+        包装成期望的字典格式。
+        
+        Args:
+            thinking_seed: 思维种子
+            user_query: 用户查询
+            max_paths: 最大路径数
+            execution_context: 执行上下文
+            
+        Returns:
+            Dict: 包含paths和diversity_score的字典
+        """
+        try:
+            logger.info(f"🛤️ 生成推理路径 (兼容接口): {thinking_seed[:50]}...")
+            
+            # 调用核心的generate_paths方法
+            reasoning_paths = self.generate_paths(
+                thinking_seed=thinking_seed,
+                task=user_query,
+                max_paths=max_paths,
+                mode='normal'
+            )
+            
+            # 计算多样性评分
+            diversity_score = self._calculate_diversity_score(reasoning_paths)
+            
+            # 包装成期望的格式
+            result = {
+                "paths": reasoning_paths,
+                "diversity_score": diversity_score,
+                "generation_method": "llm_enhanced_path_generation",
+                "total_paths": len(reasoning_paths),
+                "thinking_seed": thinking_seed,
+                "user_query": user_query
+            }
+            
+            logger.info(f"✅ 推理路径生成完成: {len(reasoning_paths)}条路径, 多样性: {diversity_score:.3f}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ 推理路径生成失败: {e}")
+            # 返回空结果但保持格式一致
+            return {
+                "paths": [],
+                "diversity_score": 0.0,
+                "generation_method": "fallback",
+                "total_paths": 0,
+                "error": str(e)
+            }
+    
+    def _calculate_diversity_score(self, paths: List[ReasoningPath]) -> float:
+        """
+        计算路径多样性评分
+        
+        Args:
+            paths: 路径列表
+            
+        Returns:
+            float: 多样性评分 (0.0-1.0)
+        """
+        if not paths or len(paths) <= 1:
+            return 0.0
+        
+        try:
+            # 基于路径类型的多样性
+            path_types = set(path.path_type for path in paths)
+            type_diversity = len(path_types) / len(paths)
+            
+            # 基于复杂度的多样性
+            complexities = [getattr(path, 'complexity_level', 3) for path in paths]
+            if len(set(complexities)) > 1:
+                complexity_diversity = len(set(complexities)) / len(complexities)
+            else:
+                complexity_diversity = 0.5
+            
+            # 基于描述长度的多样性（简单指标）
+            desc_lengths = [len(path.description) for path in paths]
+            if max(desc_lengths) > min(desc_lengths):
+                length_diversity = (max(desc_lengths) - min(desc_lengths)) / max(desc_lengths)
+            else:
+                length_diversity = 0.5
+            
+            # 综合评分
+            diversity_score = (type_diversity * 0.5 + complexity_diversity * 0.3 + length_diversity * 0.2)
+            
+            return min(diversity_score, 1.0)
+            
+        except Exception as e:
+            logger.warning(f"⚠️ 多样性评分计算失败: {e}")
+            return 0.5  # 默认中等多样性
         
     def generate_paths(self, thinking_seed: str, task: str = "", max_paths: int = 4, mode: str = 'normal') -> List[ReasoningPath]:
         """
