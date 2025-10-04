@@ -382,6 +382,7 @@ class SourceReference:
         published_date: 发布日期
         access_date: 访问日期
         source_type: 源类型
+        credibility_level: 可信度级别
         content_hash: 内容哈希值（用于检测变更）
         metadata: 额外的源信息
     """
@@ -391,6 +392,7 @@ class SourceReference:
     published_date: Optional[float] = None
     access_date: float = field(default_factory=time.time)
     source_type: KnowledgeSource = KnowledgeSource.UNKNOWN
+    credibility_level: CredibilityLevel = CredibilityLevel.UNVERIFIED  # 新增可信度级别
     content_hash: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     
@@ -936,8 +938,11 @@ class SeedVerificationContext(StageContext):
         verification_evidence: 验证证据
         identified_risks: 识别的风险
         improvement_suggestions: 改进建议
-        verification_sources: 验证信息源
+        verification_sources: 验证信息源（搜索结果）
+        search_results: 搜索结果（兼容性字段，指向verification_sources）
+        analysis_summary: 分析摘要
         cross_validation_results: 交叉验证结果
+        verification_results: 详细验证结果（兼容字段）
     """
     verification_result: bool = False
     feasibility_score: float = 0.0
@@ -946,12 +951,21 @@ class SeedVerificationContext(StageContext):
     identified_risks: List[str] = field(default_factory=list)
     improvement_suggestions: List[str] = field(default_factory=list)
     verification_sources: List[Dict[str, Any]] = field(default_factory=list)
+    search_results: List[Dict[str, Any]] = field(default_factory=list)  # 🔥 兼容性字段
+    analysis_summary: str = ""  # 🔥 分析摘要字段
     cross_validation_results: Dict[str, Any] = field(default_factory=dict)
+    verification_results: Dict[str, Any] = field(default_factory=dict)  # 🔥 添加兼容字段
     
     def __post_init__(self):
+        """后初始化：同步search_results和verification_sources"""
         super().__post_init__()
         if not self.stage_name:
             self.stage_name = "seed_verification"
+        # 确保search_results和verification_sources同步
+        if self.verification_sources and not self.search_results:
+            self.search_results = self.verification_sources
+        elif self.search_results and not self.verification_sources:
+            self.verification_sources = self.search_results
 
 
 @dataclass
@@ -1015,6 +1029,9 @@ class PathVerificationContext(StageContext):
         rejected_paths: 被拒绝的路径
         verification_time: 验证耗时
         learning_feedback: 学习反馈
+        path_types: 路径类型映射 (path_id -> path_type)
+        path_descriptions: 路径描述映射 (path_id -> description)
+        path_metadata: 路径元数据映射 (path_id -> metadata)
     """
     verified_paths: List[Dict[str, Any]] = field(default_factory=list)
     verification_results: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -1025,6 +1042,11 @@ class PathVerificationContext(StageContext):
     verification_time: float = 0.0
     learning_feedback: Dict[str, Any] = field(default_factory=dict)
     
+    # 🔥 新增字段：支持第五阶段MAB决策
+    path_types: Dict[str, str] = field(default_factory=dict)  # path_id -> path_type
+    path_descriptions: Dict[str, str] = field(default_factory=dict)  # path_id -> description
+    path_metadata: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # path_id -> metadata
+    
     def __post_init__(self):
         super().__post_init__()
         if not self.stage_name:
@@ -1033,6 +1055,33 @@ class PathVerificationContext(StageContext):
     def add_verification_result(self, path_id: str, result: Dict[str, Any]):
         """添加验证结果"""
         self.verification_results[path_id] = result
+    
+    def add_path_info(self, path_id: str, path_type: str = "", description: str = "", metadata: Dict[str, Any] = None):
+        """添加路径信息（支持第五阶段MAB决策）"""
+        if path_type:
+            self.path_types[path_id] = path_type
+        if description:
+            self.path_descriptions[path_id] = description
+        if metadata:
+            self.path_metadata[path_id] = metadata
+    
+    def populate_from_reasoning_paths(self, reasoning_paths: List[Any]):
+        """从ReasoningPath对象列表填充路径信息"""
+        for path in reasoning_paths:
+            if hasattr(path, 'path_id'):
+                path_id = path.path_id
+                self.add_path_info(
+                    path_id=path_id,
+                    path_type=getattr(path, 'path_type', ''),
+                    description=getattr(path, 'description', ''),
+                    metadata={
+                        'strategy_id': getattr(path, 'strategy_id', ''),
+                        'instance_id': getattr(path, 'instance_id', ''),
+                        'confidence_score': getattr(path, 'confidence_score', 0.5),
+                        'complexity_level': getattr(path, 'complexity_level', 3),
+                        'keywords': getattr(path, 'keywords', [])
+                    }
+                )
     
     def get_top_paths(self, n: int = 3) -> List[Tuple[str, float]]:
         """获取排名前N的路径"""
@@ -1284,3 +1333,90 @@ class StrategyDecision:
             "stage_count": sum(1 for ctx in [self.stage1_context, self.stage2_context, 
                                            self.stage3_context, self.stage4_context, self.stage5_context] if ctx is not None)
         }
+    
+    def to_dict(self, include_contexts: bool = False) -> Dict[str, Any]:
+        """
+        将StrategyDecision对象转换为可JSON序列化的字典
+        
+        Args:
+            include_contexts: 是否包含完整的阶段上下文信息
+            
+        Returns:
+            Dict[str, Any]: 可序列化的字典表示
+        """
+        def serialize_object(obj):
+            """安全地序列化对象"""
+            if obj is None:
+                return None
+            elif hasattr(obj, 'to_dict'):
+                return obj.to_dict()
+            elif hasattr(obj, '__dict__'):
+                # 对于dataclass对象，转换为字典
+                result = {}
+                for key, value in obj.__dict__.items():
+                    if isinstance(value, (str, int, float, bool, type(None))):
+                        result[key] = value
+                    elif isinstance(value, (list, tuple)):
+                        result[key] = [serialize_object(item) for item in value]
+                    elif isinstance(value, dict):
+                        result[key] = {k: serialize_object(v) for k, v in value.items()}
+                    else:
+                        result[key] = str(value)
+                return result
+            elif isinstance(obj, dict):
+                return {k: serialize_object(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [serialize_object(item) for item in obj]
+            else:
+                return str(obj)
+        
+        # 序列化chosen_path
+        chosen_path_serialized = None
+        if self.chosen_path:
+            if hasattr(self.chosen_path, 'path_type'):
+                # ReasoningPath对象
+                chosen_path_serialized = {
+                    "path_id": getattr(self.chosen_path, 'path_id', ''),
+                    "path_type": getattr(self.chosen_path, 'path_type', ''),
+                    "description": getattr(self.chosen_path, 'description', ''),
+                    "strategy_id": getattr(self.chosen_path, 'strategy_id', ''),
+                    "confidence_score": getattr(self.chosen_path, 'confidence_score', 0.0)
+                }
+            elif isinstance(self.chosen_path, dict):
+                chosen_path_serialized = self.chosen_path
+            else:
+                chosen_path_serialized = str(self.chosen_path)
+        
+        result = {
+            "decision_id": self.decision_id,
+            "user_query": self.user_query,
+            "timestamp": self.timestamp,
+            "round_number": self.round_number,
+            "chosen_path": chosen_path_serialized,
+            "final_reasoning": self.final_reasoning,
+            "confidence_score": self.confidence_score,
+            "decision_quality_metrics": self.decision_quality_metrics.copy(),
+            "total_execution_time": self.total_execution_time,
+            "stage_execution_times": self.stage_execution_times.copy(),
+            "execution_context": serialize_object(self.execution_context) if self.execution_context else None,
+            "metadata": self.metadata.copy(),
+            "errors": self.errors.copy(),
+            "warnings": self.warnings.copy(),
+            # 添加计算属性
+            "is_complete": self.is_complete,
+            "has_errors": self.has_errors,
+            "has_warnings": self.has_warnings,
+            "thinking_seed": self.thinking_seed
+        }
+        
+        # 可选地包含阶段上下文
+        if include_contexts:
+            result.update({
+                "stage1_context": serialize_object(self.stage1_context),
+                "stage2_context": serialize_object(self.stage2_context),
+                "stage3_context": serialize_object(self.stage3_context),
+                "stage4_context": serialize_object(self.stage4_context),
+                "stage5_context": serialize_object(self.stage5_context)
+            })
+        
+        return result
