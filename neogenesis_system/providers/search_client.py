@@ -6,6 +6,7 @@
 Search Tool Client - for connecting to external search engines
 """
 
+import os
 import json
 import logging
 import time
@@ -34,8 +35,8 @@ except ImportError:
     TAVILY_AVAILABLE = False
     logging.warning("⚠️ tavily-python库未安装，将使用模拟搜索结果")
 
-# 🔑 从环境变量读取Tavily API密钥
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+# 🔑 Tavily API密钥
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "Your_API_Key")
 
 
 # 🔥 根本性SSL修复：自定义SSL适配器
@@ -807,16 +808,9 @@ class IdeaVerificationSearchClient:
                 logger.info(f"🔄 使用传统回退方法，基于用户查询: {user_query_fallback[:40]}")
                 return self._fallback_integrate_query(idea_text, user_query_fallback, context)
         
-        # 如果没有用户查询，使用传统的关键概念提取
-        key_concepts = self._extract_key_concepts(idea_text)
-        
-        # 🎯 修复：构建查询时避免添加"可行性"、"方法"等抽象词汇
-        if len(key_concepts) >= 2:
-            # 直接使用关键概念，不添加"可行性 实现方法"等词
-            query = f"{key_concepts[0]} {key_concepts[1]}"
-        else:
-            # 使用原始文本的前50个字符
-            query = idea_text[:50].strip()
+        # 如果没有用户查询，使用简单的文本截取
+        # 使用原始文本的前50个字符作为查询
+        query = idea_text[:50].strip()
         
         # 添加上下文信息（如果有具体领域）
         if context and 'domain' in context:
@@ -828,22 +822,6 @@ class IdeaVerificationSearchClient:
         logger.debug(f"🔍 构建验证查询（传统方法）: {query}")
         return query
     
-    def _extract_key_concepts(self, text: str) -> List[str]:
-        """提取文本中的关键概念"""
-        # 简化的关键概念提取（实际应用中可以使用更复杂的NLP方法）
-        tech_keywords = [
-            'API', 'api', '算法', '数据库', '系统', '架构', '优化',
-            '机器学习', 'ML', 'AI', '人工智能', '深度学习',
-            '网络', '爬虫', '数据分析', '实时', '性能', '安全',
-            '并发', '分布式', '微服务', '容器', '云计算'
-        ]
-        
-        concepts = []
-        for keyword in tech_keywords:
-            if keyword in text:
-                concepts.append(keyword)
-        
-        return concepts[:3]  # 返回前3个关键概念
     
     def _llm_integrate_seed_and_query(self, thinking_seed: str, user_query: str, context: Optional[Dict] = None) -> str:
         """
@@ -1031,8 +1009,18 @@ class IdeaVerificationSearchClient:
                     error_message=f"搜索服务不可用，提供基础分析: {search_response.error_message}"
                 )
             
-            # 分析搜索结果计算可行性分数
-            feasibility_score = self._calculate_feasibility_score(search_response.results, idea_text)
+            # 提取用户查询用于LLM评分
+            user_query = None
+            if context:
+                user_query = context.get('user_query') or context.get('original_query') or context.get('query')
+            
+            # 分析搜索结果计算可行性分数（传入user_query用于LLM评分）
+            feasibility_score = self._calculate_feasibility_score(
+                search_response.results, 
+                idea_text, 
+                user_query=user_query,
+                context=context
+            )
             
             # 生成分析摘要
             analysis_summary = self._generate_analysis_summary(search_response.results, idea_text, feasibility_score)
@@ -1059,13 +1047,21 @@ class IdeaVerificationSearchClient:
                 error_message=str(e)
             )
     
-    def _calculate_feasibility_score(self, search_results: List[SearchResult], idea_text: str) -> float:
+    def _calculate_feasibility_score(self, search_results: List[SearchResult], idea_text: str, 
+                                     user_query: str = None, context: Optional[Dict] = None) -> float:
         """
-        基于搜索结果计算可行性分数
+        🔥 完全基于LLM语义分析计算可行性分数
+        
+        改进：
+        1. 完全依赖LLM语义相关度评分（摒弃关键词匹配）
+        2. 根据问题类型进行精准评估
+        3. LLM不可用时使用保守的默认分数
         
         Args:
             search_results: 搜索结果列表
             idea_text: 想法文本
+            user_query: 用户原始查询（用于LLM评分）
+            context: 上下文信息
             
         Returns:
             float: 可行性分数 (0.0-1.0)
@@ -1073,71 +1069,190 @@ class IdeaVerificationSearchClient:
         if not search_results:
             return 0.1  # 如果没有搜索结果，给一个很低的分数
         
-        # 关键指标
-        total_score = 0.0
-        max_score = 0.0
+        # 🎯 检测问题类型（知识科普 vs 技术实现）
+        query_type = self._detect_query_type(user_query or idea_text)
+        logger.info(f"🎯 检测到问题类型: {query_type}")
         
-        # 1. 结果数量指标 (权重: 0.2)
-        result_count_score = min(len(search_results) / 5.0, 1.0)  # 5个结果为满分
-        total_score += result_count_score * 0.2
-        max_score += 0.2
+        # 🔥 使用LLM进行语义相关度评分
+        llm_semantic_score = self._calculate_llm_semantic_relevance(
+            search_results, idea_text, user_query, context
+        )
         
-        # 2. 内容相关性指标 (权重: 0.4)
-        key_concepts = self._extract_key_concepts(idea_text)
-        relevance_scores = []
-        
-        for result in search_results:
-            content = (result.title + " " + result.snippet).lower()
-            concept_matches = sum(1 for concept in key_concepts if concept.lower() in content)
-            relevance = concept_matches / max(len(key_concepts), 1)
-            relevance_scores.append(relevance)
-        
-        if relevance_scores:
-            avg_relevance = sum(relevance_scores) / len(relevance_scores)
-            total_score += avg_relevance * 0.4
-        max_score += 0.4
-        
-        # 3. 实现可能性指标 (权重: 0.3)
-        implementation_keywords = [
-            '实现', '方法', '技术', '解决方案', '开发', '构建', '设计',
-            'implement', 'solution', 'method', 'approach', 'technology'
-        ]
-        
-        implementation_scores = []
-        for result in search_results:
-            content = (result.title + " " + result.snippet).lower()
-            keyword_matches = sum(1 for keyword in implementation_keywords if keyword in content)
-            impl_score = min(keyword_matches / 3.0, 1.0)  # 3个关键词为满分
-            implementation_scores.append(impl_score)
-        
-        if implementation_scores:
-            avg_implementation = sum(implementation_scores) / len(implementation_scores)
-            total_score += avg_implementation * 0.3
-        max_score += 0.3
-        
-        # 4. 风险指标 (权重: 0.1，负面影响)
-        risk_keywords = [
-            '困难', '挑战', '问题', '风险', '限制', '障碍',
-            'difficult', 'challenge', 'problem', 'risk', 'limitation', 'obstacle'
-        ]
-        
-        risk_scores = []
-        for result in search_results:
-            content = (result.title + " " + result.snippet).lower()
-            risk_matches = sum(1 for keyword in risk_keywords if keyword in content)
-            risk_score = min(risk_matches / 2.0, 1.0)  # 风险指标，越高越不好
-            risk_scores.append(risk_score)
-        
-        if risk_scores:
-            avg_risk = sum(risk_scores) / len(risk_scores)
-            risk_penalty = avg_risk * 0.1
-            total_score = max(0, total_score - risk_penalty)
-        
-        # 归一化分数
-        final_score = total_score / max_score if max_score > 0 else 0.0
+        if llm_semantic_score is not None:
+            # LLM可用：直接使用语义评分
+            final_score = llm_semantic_score
+            logger.info(f"✅ LLM语义评分: {final_score:.3f} (问题类型: {query_type})")
+        else:
+            # LLM不可用：使用保守的默认评分
+            # 基于搜索结果数量给出保守估计
+            result_count = len(search_results)
+            if result_count >= 5:
+                final_score = 0.6  # 有足够多结果，中等偏上
+            elif result_count >= 3:
+                final_score = 0.5  # 有一些结果，中等
+            else:
+                final_score = 0.4  # 结果较少，中等偏下
+            logger.warning(f"⚠️ LLM不可用，使用保守默认评分: {final_score:.3f} (基于{result_count}个搜索结果)")
         
         # 确保分数在合理范围内
-        return max(0.0, min(1.0, final_score))
+        final_score = max(0.0, min(1.0, final_score))
+        
+        return final_score
+    
+    def _detect_query_type(self, text: str) -> str:
+        """
+        检测查询类型
+        
+        Returns:
+            "knowledge": 知识科普类（了解、学习、介绍）
+            "implementation": 技术实现类（实现、开发、构建）
+            "general": 通用类型
+        """
+        text_lower = text.lower()
+        
+        # 知识科普类关键词
+        knowledge_keywords = [
+            '了解', '学习', '知识', '什么是', '介绍', '解释', '理解', '认识',
+            'learn', 'know', 'understand', 'what is', 'introduce', 'explain'
+        ]
+        
+        # 技术实现类关键词
+        implementation_keywords = [
+            '实现', '开发', '构建', '设计', '创建', '搭建', '编写', '制作',
+            'implement', 'develop', 'build', 'create', 'design', 'code', 'make'
+        ]
+        
+        knowledge_matches = sum(1 for kw in knowledge_keywords if kw in text_lower)
+        implementation_matches = sum(1 for kw in implementation_keywords if kw in text_lower)
+        
+        if knowledge_matches > implementation_matches and knowledge_matches > 0:
+            return "knowledge"
+        elif implementation_matches > knowledge_matches and implementation_matches > 0:
+            return "implementation"
+        else:
+            return "general"
+    
+    def _calculate_llm_semantic_relevance(self, search_results: List[SearchResult], 
+                                          idea_text: str, user_query: str = None,
+                                          context: Optional[Dict] = None) -> Optional[float]:
+        """
+        🔥 使用LLM进行语义相关度评分（核心创新）
+        
+        Args:
+            search_results: 搜索结果列表
+            idea_text: 想法文本
+            user_query: 用户原始查询
+            context: 上下文信息
+            
+        Returns:
+            Optional[float]: 语义相关度分数 (0.0-1.0)，如果LLM不可用则返回None
+        """
+        # 检查语义分析器是否可用
+        if not self.semantic_analyzer or not hasattr(self.semantic_analyzer, 'llm_manager'):
+            logger.warning("⚠️ 语义分析器不可用，跳过LLM评分")
+            return None
+        
+        if not self.semantic_analyzer.llm_manager:
+            logger.warning("⚠️ LLM管理器不可用，跳过LLM评分")
+            return None
+        
+        try:
+            # 准备搜索结果摘要（取前3个结果）
+            search_summary = self._format_search_results_for_llm(search_results[:3])
+            
+            # 构建LLM评分提示词
+            evaluation_prompt = f"""你是一个专业的信息相关性评估专家。请评估搜索结果与用户问题的相关性。
+
+**用户原始问题：**
+{user_query or idea_text}
+
+**AI思考要点：**
+{idea_text[:300]}
+
+**搜索结果摘要：**
+{search_summary}
+
+**评估维度：**
+请从以下三个维度评估搜索结果的质量（每个维度0.0-1.0分）：
+
+1. **内容相关性 (relevance)**：搜索结果是否直接回答了用户的问题？
+   - 1.0: 完全相关，直接回答问题
+   - 0.7: 高度相关，提供了有用信息
+   - 0.4: 部分相关，有一些关联
+   - 0.0: 完全不相关
+
+2. **信息质量 (quality)**：搜索结果的内容质量如何？
+   - 1.0: 信息详细、权威、准确
+   - 0.7: 信息较为完整和可靠
+   - 0.4: 信息简单但基本准确
+   - 0.0: 信息不足或不可靠
+
+3. **实用价值 (actionability)**：搜索结果对用户是否有实用价值？
+   - 1.0: 提供了明确的答案或可行的建议
+   - 0.7: 提供了有价值的信息或思路
+   - 0.4: 提供了一些参考价值
+   - 0.0: 缺乏实用价值
+
+**输出要求：**
+请仅返回JSON格式，不要其他内容：
+{{
+    "relevance": 0.0-1.0的相关性分数,
+    "quality": 0.0-1.0的质量分数,
+    "actionability": 0.0-1.0的实用价值分数,
+    "explanation": "简短说明评分理由（1-2句话）"
+}}"""
+
+            logger.info("🔍 [LLM评分] 调用语义分析器进行评分...")
+            
+            # 调用LLM
+            response = self.semantic_analyzer.llm_manager.chat_completion(
+                messages=[{"role": "user", "content": evaluation_prompt}],
+                temperature=0.1,  # 低温度保证评分稳定
+                max_tokens=300
+            )
+            
+            if response and response.success and response.content:
+                # 解析JSON响应
+                from ..providers.rag_seed_generator import parse_json_response
+                result_data = parse_json_response(response.content)
+                
+                if result_data and all(k in result_data for k in ['relevance', 'quality', 'actionability']):
+                    # 计算综合分数（三个维度的加权平均）
+                    relevance = float(result_data['relevance'])
+                    quality = float(result_data['quality'])
+                    actionability = float(result_data['actionability'])
+                    
+                    # 加权：相关性40%，质量30%，实用价值30%
+                    semantic_score = relevance * 0.4 + quality * 0.3 + actionability * 0.3
+                    
+                    explanation = result_data.get('explanation', '')
+                    logger.info(f"✅ [LLM评分] 相关性:{relevance:.2f} 质量:{quality:.2f} 实用:{actionability:.2f} → 综合:{semantic_score:.3f}")
+                    logger.info(f"💡 [LLM评分] 评分理由: {explanation}")
+                    
+                    return semantic_score
+                else:
+                    logger.warning(f"⚠️ [LLM评分] JSON解析不完整: {result_data}")
+                    return None
+            else:
+                logger.warning(f"⚠️ [LLM评分] LLM调用失败")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ [LLM评分] 语义相关度评分失败: {e}")
+            return None
+    
+    def _format_search_results_for_llm(self, search_results: List[SearchResult]) -> str:
+        """格式化搜索结果供LLM评估"""
+        if not search_results:
+            return "未找到搜索结果"
+        
+        formatted = []
+        for i, result in enumerate(search_results, 1):
+            formatted.append(f"{i}. 标题: {result.title}")
+            formatted.append(f"   摘要: {result.snippet[:150]}...")
+            formatted.append("")
+        
+        return "\n".join(formatted)
     
     def _generate_analysis_summary(self, search_results: List[SearchResult], 
                                  idea_text: str, feasibility_score: float) -> str:
@@ -1173,16 +1288,11 @@ class IdeaVerificationSearchClient:
         # 统计相关结果数量
         key_findings.append(f"搜索到{len(search_results)}个相关结果")
         
-        # 分析技术关键词
-        tech_keywords = self._extract_key_concepts(idea_text)
-        if tech_keywords:
-            key_findings.append(f"涉及技术领域: {', '.join(tech_keywords[:3])}")
-        
-        # 分析搜索结果质量
+        # 分析搜索结果质量（基于内容长度）
         if search_results:
             has_detailed_content = sum(1 for r in search_results if len(r.snippet) > 50)
             if has_detailed_content >= len(search_results) * 0.6:
-                key_findings.append("找到了详细的技术资料")
+                key_findings.append("找到了详细的相关资料")
             else:
                 key_findings.append("相关资料有限")
         
