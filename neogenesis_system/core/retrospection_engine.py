@@ -536,12 +536,16 @@ class TaskRetrospectionEngine:
         try:
             # 处理LLM维度
             for dim in llm_dimensions:
-                strategy_id = f"retro_llm_{dim.get('dimension_id', 'unknown')}"
+                # 修复：ReasoningPath对象使用属性访问而非.get()方法
+                dimension_id = getattr(dim, 'path_id', 'unknown')
+                dimension_type = getattr(dim, 'path_type', 'creative_retrospection')
+                
+                strategy_id = f"retro_llm_{dimension_id}"
                 
                 # 注入MAB系统 - 利用动态创建能力
                 success = self.mab_converger._create_strategy_arm_if_missing(
                     strategy_id, 
-                    path_type=dim.get('dimension_type', 'creative_retrospection')
+                    path_type=dimension_type
                 )
                 
                 # 给予初始探索奖励
@@ -564,37 +568,67 @@ class TaskRetrospectionEngine:
                 logger.debug(f"🧩 沉淀LLM维度: {strategy_id}")
             
             # 处理Aha-Moment路径
-            for path in aha_paths:
-                strategy_id = path.path_id or f"retro_aha_{int(time.time() * 1000)}"
-                
-                # 注入MAB系统
-                success = self.mab_converger._create_strategy_arm_if_missing(
-                    strategy_id,
-                    path_type=path.path_type
-                )
-                
-                # 给予初始探索奖励
-                initial_reward = self.config["assimilation"]["initial_exploration_reward"]
-                update_result = self.mab_converger.update_path_performance(
-                    strategy_id,
-                    success=True,
-                    reward=initial_reward * 1.2,  # Aha-Moment路径给予更高奖励
-                    source="retrospection"  # 🔍 标记来源为回溯分析
-                )
-                
-                assimilated_strategies.append(strategy_id)
-                mab_updates.append({
-                    "strategy_id": strategy_id,
-                    "source": "aha_moment_path",
-                    "initial_reward": initial_reward * 1.2,
-                    "path_data": {
-                        "path_type": path.path_type,
-                        "steps": path.steps[:3] if hasattr(path, 'steps') else [],
-                        "confidence": getattr(path, 'confidence_score', 0.5)
-                    }
-                })
-                
-                logger.debug(f"🧩 沉淀Aha-Moment路径: {strategy_id}")
+            for i, path in enumerate(aha_paths):
+                try:
+                    logger.debug(f"🔧 处理第{i+1}个Aha路径: {type(path)}")
+                    
+                    # 🔧 增强的防御性措施：多层检查确保安全访问
+                    if isinstance(path, dict):
+                        # 如果是字典，使用字典的 get 方法访问属性
+                        strategy_id = path.get('path_id') or f"retro_aha_{int(time.time() * 1000)}"
+                        path_type = path.get('path_type', 'creative_retrospection')
+                        path_steps = path.get('steps', [])[:3] if path.get('steps') else []
+                        confidence_score = path.get('confidence_score', 0.5)
+                        logger.debug(f"   📋 字典模式访问成功: {strategy_id}")
+                    elif hasattr(path, 'path_id'):
+                        # 如果是 ReasoningPath 对象，使用安全的属性访问
+                        strategy_id = getattr(path, 'path_id', None) or f"retro_aha_{int(time.time() * 1000)}"
+                        path_type = getattr(path, 'path_type', 'creative_retrospection')
+                        path_steps = getattr(path, 'steps', [])[:3] if hasattr(path, 'steps') else []
+                        confidence_score = getattr(path, 'confidence_score', 0.5)
+                        logger.debug(f"   🧠 对象模式访问成功: {strategy_id}")
+                    else:
+                        # 如果类型不明，使用默认值
+                        logger.warning(f"⚠️ 未知路径类型，使用默认值: {type(path)}")
+                        strategy_id = f"retro_aha_unknown_{int(time.time() * 1000)}_{i}"
+                        path_type = 'creative_retrospection'
+                        path_steps = []
+                        confidence_score = 0.5
+                    
+                    # 注入MAB系统
+                    success = self.mab_converger._create_strategy_arm_if_missing(
+                        strategy_id,
+                        path_type=path_type
+                    )
+                    
+                    # 给予初始探索奖励
+                    initial_reward = self.config["assimilation"]["initial_exploration_reward"]
+                    update_result = self.mab_converger.update_path_performance(
+                        strategy_id,
+                        success=True,
+                        reward=initial_reward * 1.2,  # Aha-Moment路径给予更高奖励
+                        source="retrospection"  # 🔍 标记来源为回溯分析
+                    )
+                    
+                    assimilated_strategies.append(strategy_id)
+                    mab_updates.append({
+                        "strategy_id": strategy_id,
+                        "source": "aha_moment_path",
+                        "initial_reward": initial_reward * 1.2,
+                        "path_data": {
+                            "path_type": path_type,
+                            "steps": path_steps,
+                            "confidence": confidence_score
+                        }
+                    })
+                    
+                    logger.debug(f"🧩 沉淀Aha-Moment路径: {strategy_id}")
+                    
+                except Exception as e:
+                    logger.error(f"❌ 处理Aha-Moment路径时发生错误: {e}")
+                    logger.error(f"   路径类型: {type(path)}")
+                    logger.error(f"   路径内容: {path}")
+                    continue
             
             logger.info(f"🧩 知识沉淀完成: {len(assimilated_strategies)} 个策略注入MAB系统")
             
