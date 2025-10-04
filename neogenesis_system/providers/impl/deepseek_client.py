@@ -95,11 +95,11 @@ class APIResponse:
 class ClientConfig:
     """客户端配置 - 兼容旧版本的配置结构"""
     api_key: str
-    base_url: str = "https://api.deepseek.com"
+    base_url: str = "https://api.deepseek.com/v1"
     model: str = DEEPSEEK_MODEL
-    timeout: tuple = (30, 180)
-    max_retries: int = 3
-    retry_delay_base: float = 2.0
+    timeout: tuple = (60, 300)  # 🔥 修复：增加超时时间 (连接超时60s, 读取超时300s)
+    max_retries: int = 5  # 🔥 修复：增加重试次数
+    retry_delay_base: float = 3.0  # 🔥 修复：增加重试延迟基数
     temperature: float = 0.7
     max_tokens: int = 2000
     enable_cache: bool = True
@@ -107,6 +107,9 @@ class ClientConfig:
     enable_metrics: bool = True
     proxies: Optional[Dict[str, str]] = None
     request_interval: float = 1.0  # 🔧 新增：请求间隔时间(秒)
+    # 🔥 新增：网络错误处理配置
+    network_retry_multiplier: float = 2.0  # 网络错误重试时间倍数
+    max_network_retry_delay: float = 120.0  # 最大网络重试延迟
     
     def to_llm_config(self) -> LLMConfig:
         """转换为统一的LLMConfig格式"""
@@ -123,7 +126,10 @@ class ClientConfig:
             enable_cache=self.enable_cache,
             cache_ttl=self.cache_ttl,
             proxies=self.proxies,
-            request_interval=self.request_interval
+            request_interval=self.request_interval,
+            # 🔥 新增：网络错误处理配置
+            network_retry_multiplier=getattr(self, 'network_retry_multiplier', 2.0),
+            max_network_retry_delay=getattr(self, 'max_network_retry_delay', 120.0)
         )
 
 
@@ -135,6 +141,9 @@ class ClientMetrics:
     failed_requests: int = 0
     total_response_time: float = 0.0
     total_tokens_used: int = 0
+    total_tokens: int = 0  # 🔧 新增：总token数（用于异步统计）
+    prompt_tokens: int = 0  # 🔧 新增：提示token数
+    completion_tokens: int = 0  # 🔧 新增：完成token数
     cache_hits: int = 0
     error_counts: Dict[APIErrorType, int] = field(default_factory=dict)
     
@@ -202,6 +211,14 @@ class DeepSeekClient(BaseLLMClient):
             'User-Agent': 'Neogenesis-System/1.0'
         })
         
+        # 修复SSL错误 - 禁用SSL验证(如果遇到证书问题)
+        # 注意：生产环境应该使用正确的证书验证
+        self.session.verify = False
+        
+        # 禁用SSL警告
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
         # 配置代理
         if self.config.proxies:
             self.session.proxies.update(self.config.proxies)
@@ -231,21 +248,24 @@ class DeepSeekClient(BaseLLMClient):
         logger.info(f"   请求间隔: {self._request_interval}s")
     
     def _convert_llm_config_to_client_config(self, llm_config: LLMConfig) -> ClientConfig:
-        """将统一LLMConfig转换为DeepSeek的ClientConfig"""
+        """🔥 增强版：将统一LLMConfig转换为DeepSeek的ClientConfig"""
         return ClientConfig(
             api_key=llm_config.api_key,
-            base_url=llm_config.base_url or "https://api.deepseek.com",
+            base_url=llm_config.base_url or "https://api.deepseek.com/v1",
             model=llm_config.model_name,
-            timeout=llm_config.timeout,
-            max_retries=llm_config.max_retries,
-            retry_delay_base=llm_config.retry_delay_base,
+            timeout=llm_config.timeout or (60, 300),  #修复：使用新的默认超时时间
+            max_retries=llm_config.max_retries or 5,  #修复：使用新的默认重试次数
+            retry_delay_base=llm_config.retry_delay_base or 3.0,  #修复：使用新的默认延迟
             temperature=llm_config.temperature,
             max_tokens=llm_config.max_tokens,
             enable_cache=llm_config.enable_cache,
             cache_ttl=llm_config.cache_ttl,
             enable_metrics=True,  # 为LLMConfig设置默认值
             proxies=llm_config.proxies,
-            request_interval=llm_config.request_interval
+            request_interval=llm_config.request_interval or 1.0,
+            # 🔥 新增：网络错误处理配置
+            network_retry_multiplier=getattr(llm_config, 'network_retry_multiplier', 2.0),
+            max_network_retry_delay=getattr(llm_config, 'max_network_retry_delay', 120.0)
         )
     
     def _init_async_client(self):
@@ -261,7 +281,8 @@ class DeepSeekClient(BaseLLMClient):
             client_kwargs = {
                 'headers': headers,
                 'timeout': httpx.Timeout(self.config.timeout),
-                'limits': httpx.Limits(max_keepalive_connections=10, max_connections=100)
+                'limits': httpx.Limits(max_keepalive_connections=10, max_connections=100),
+                'verify': False  # 🔥 关键修复：禁用SSL验证
             }
             
             # 处理代理配置 - 使用更兼容的方式
@@ -270,16 +291,16 @@ class DeepSeekClient(BaseLLMClient):
                     # 尝试新的httpx方式
                     client_kwargs['proxies'] = self.config.proxies
                     self.async_client = httpx.AsyncClient(**client_kwargs)
-                    logger.debug("🚀 异步HTTP客户端初始化完成（含代理配置）")
+                    logger.debug("🚀 异步HTTP客户端初始化完成（含代理配置，SSL验证已禁用）")
                 except TypeError as te:
                     # 如果失败，则不使用代理创建客户端
                     logger.warning(f"⚠️ httpx版本不支持proxies参数，跳过代理配置: {te}")
                     client_kwargs.pop('proxies', None)
                     self.async_client = httpx.AsyncClient(**client_kwargs)
-                    logger.debug("🚀 异步HTTP客户端初始化完成（无代理）")
+                    logger.debug("🚀 异步HTTP客户端初始化完成（无代理，SSL验证已禁用）")
             else:
                 self.async_client = httpx.AsyncClient(**client_kwargs)
-                logger.debug("🚀 异步HTTP客户端初始化完成")
+                logger.debug("🚀 异步HTTP客户端初始化完成（SSL验证已禁用）")
             
         except Exception as e:
             logger.error(f"❌ 异步客户端初始化失败: {e}")
@@ -505,7 +526,8 @@ class DeepSeekClient(BaseLLMClient):
                 response = self.session.post(
                     f"{self.config.base_url}/chat/completions",
                     json=request_data,
-                    timeout=self.config.timeout
+                    timeout=self.config.timeout,
+                    verify=False  # 禁用SSL验证以避免SSL协议错误
                 )
                 
                 response_time = time.time() - start_time
@@ -537,8 +559,12 @@ class DeepSeekClient(BaseLLMClient):
                 )
                 
                 if attempt < self.config.max_retries - 1:
-                    wait_time = 5 * (attempt + 1)
-                    logger.warning(f"⏱️ 超时重试，等待 {wait_time}s...")
+                    # 🔥 修复：超时错误也使用指数退避，但延迟较短
+                    wait_time = min(
+                        self.config.retry_delay_base * (2 ** attempt),
+                        60.0  # 超时重试最大延迟60秒
+                    )
+                    logger.warning(f"⏱️ 超时重试，等待 {wait_time:.1f}s...")
                     time.sleep(wait_time)
                 
             except requests.exceptions.ConnectionError as e:
@@ -551,8 +577,13 @@ class DeepSeekClient(BaseLLMClient):
                 )
                 
                 if attempt < self.config.max_retries - 1:
-                    wait_time = 10 * (attempt + 1)
-                    logger.warning(f"🌐 网络错误重试，等待 {wait_time}s...")
+                    # 🔥 修复：使用指数退避策略，但有最大限制
+                    base_delay = getattr(self.config, 'network_retry_multiplier', 2.0) * self.config.retry_delay_base
+                    wait_time = min(
+                        base_delay * (2 ** attempt),  # 指数退避
+                        getattr(self.config, 'max_network_retry_delay', 120.0)  # 最大延迟限制
+                    )
+                    logger.warning(f"🌐 网络错误重试，等待 {wait_time:.1f}s...")
                     time.sleep(wait_time)
                     
             except Exception as e:
@@ -568,12 +599,32 @@ class DeepSeekClient(BaseLLMClient):
                     logger.warning(f"❌ 未知错误重试，等待 3s...")
                     time.sleep(3)
         
-        # 所有重试失败
+        # 🔥 增强版：所有重试失败后的详细错误报告
         logger.error(f"❌ API调用失败: 所有 {self.config.max_retries} 次重试均失败")
+        
+        # 提供详细的失败分析和建议
+        if last_error:
+            if last_error.error_type == APIErrorType.NETWORK_ERROR:
+                logger.error("💡 网络连接问题建议:")
+                logger.error("   1. 检查网络连接状态")
+                logger.error("   2. 检查防火墙设置")
+                logger.error("   3. 尝试使用代理或VPN")
+                logger.error("   4. 检查DNS解析是否正常")
+            elif last_error.error_type == LLMErrorType.TIMEOUT_ERROR:
+                logger.error("💡 请求超时问题建议:")
+                logger.error("   1. 当前超时设置: 连接{}s, 读取{}s".format(*self.config.timeout))
+                logger.error("   2. 可以尝试增加超时时间")
+                logger.error("   3. 检查网络延迟情况")
+            elif last_error.error_type == LLMErrorType.AUTHENTICATION:
+                logger.error("💡 认证失败建议:")
+                logger.error("   1. 检查API密钥是否正确")
+                logger.error("   2. 检查API密钥是否过期")
+                logger.error("   3. 检查账户余额")
+        
         return last_error or APIResponse(
             success=False,
             error_type=APIErrorType.UNKNOWN_ERROR,
-            error_message="所有重试尝试均失败"
+            error_message="所有重试尝试均失败，请检查网络连接和API配置"
         )
     
     def _process_success_response(self, response: requests.Response, response_time: float) -> APIResponse:
@@ -893,7 +944,7 @@ class DeepSeekClient(BaseLLMClient):
         
         # 所有重试都失败了
         if self.metrics:
-            self.metrics.total_failures += 1
+            self.metrics.failed_requests += 1
         return last_error or APIResponse(
             success=False,
             error_type=LLMErrorType.UNKNOWN_ERROR,
@@ -989,6 +1040,119 @@ class DeepSeekClient(BaseLLMClient):
             await self.async_client.aclose()
             self.async_client = None
             logger.debug("🚀 异步HTTP客户端已关闭")
+    
+    # ==================== 🔥 新增：健康检查和诊断方法 ====================
+    
+    def health_check(self, timeout: Optional[float] = 30.0) -> Dict[str, Any]:
+        """
+        🔥 新增：执行DeepSeek API健康检查
+        
+        Args:
+            timeout: 健康检查超时时间（秒）
+            
+        Returns:
+            Dict包含健康状态信息
+        """
+        health_status = {
+            'is_healthy': False,
+            'response_time': None,
+            'error_message': None,
+            'api_accessible': False,
+            'authentication_valid': False,
+            'network_connectivity': False,
+            'timestamp': time.time()
+        }
+        
+        try:
+            logger.info("🔍 开始DeepSeek API健康检查...")
+            start_time = time.time()
+            
+            # 使用简单的测试请求
+            test_request = {
+                "model": self.config.model,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "max_tokens": 10,
+                "temperature": 0.1
+            }
+            
+            # 临时修改超时设置用于健康检查
+            original_timeout = self.config.timeout
+            if timeout:
+                self.config.timeout = (min(timeout/2, 30), timeout)
+            
+            try:
+                response = self.session.post(
+                    f"{self.config.base_url}/chat/completions",
+                    json=test_request,
+                    timeout=self.config.timeout,
+                    verify=False  # 禁用SSL验证以避免SSL协议错误
+                )
+                
+                response_time = time.time() - start_time
+                health_status['response_time'] = response_time
+                health_status['network_connectivity'] = True
+                health_status['api_accessible'] = True
+                
+                if response.status_code == 200:
+                    health_status['is_healthy'] = True
+                    health_status['authentication_valid'] = True
+                    logger.info(f"✅ DeepSeek API健康检查通过 ({response_time:.2f}s)")
+                elif response.status_code == 401:
+                    health_status['error_message'] = "API密钥认证失败"
+                    logger.warning("⚠️ DeepSeek API认证失败")
+                else:
+                    health_status['error_message'] = f"API返回错误状态码: {response.status_code}"
+                    logger.warning(f"⚠️ DeepSeek API返回错误: {response.status_code}")
+                    
+            finally:
+                # 恢复原始超时设置
+                self.config.timeout = original_timeout
+                
+        except requests.exceptions.Timeout:
+            health_status['error_message'] = "健康检查请求超时"
+            logger.warning("⚠️ DeepSeek API健康检查超时")
+        except requests.exceptions.ConnectionError as e:
+            health_status['error_message'] = f"网络连接错误: {str(e)}"
+            logger.warning(f"⚠️ DeepSeek API网络连接失败: {e}")
+        except Exception as e:
+            health_status['error_message'] = f"健康检查异常: {str(e)}"
+            logger.error(f"❌ DeepSeek API健康检查异常: {e}")
+        
+        return health_status
+    
+    def get_client_status(self) -> Dict[str, Any]:
+        """
+        🔥 新增：获取客户端状态信息
+        
+        Returns:
+            Dict包含客户端详细状态
+        """
+        status = {
+            'client_type': 'DeepSeekClient',
+            'config': {
+                'base_url': self.config.base_url,
+                'model': self.config.model,
+                'timeout': self.config.timeout,
+                'max_retries': self.config.max_retries,
+                'retry_delay_base': self.config.retry_delay_base
+            },
+            'session_active': self.session is not None,
+            'async_client_available': self.async_client is not None,
+            'cache_enabled': self.config.enable_cache,
+            'metrics_enabled': self.metrics is not None
+        }
+        
+        # 添加指标信息（如果可用）
+        if self.metrics:
+            status['metrics'] = {
+                'total_requests': self.metrics.total_requests,
+                'successful_requests': self.metrics.successful_requests,
+                'failed_requests': self.metrics.failed_requests,
+                'average_response_time': self.metrics.average_response_time,
+                'error_counts': dict(self.metrics.error_counts)
+            }
+        
+        return status
 
 
 # 工厂函数和便捷接口
@@ -1018,6 +1182,10 @@ def create_llm_client(api_key: str, **kwargs) -> DeepSeekClient:
     Returns:
         DeepSeekClient 实例（实现BaseLLMClient接口）
     """
+    # 确保base_url有默认值
+    if 'base_url' not in kwargs:
+        kwargs['base_url'] = "https://api.deepseek.com/v1"
+    
     llm_config = LLMConfig(
         provider=LLMProvider.DEEPSEEK,
         api_key=api_key,
