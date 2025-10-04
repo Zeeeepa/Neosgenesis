@@ -157,6 +157,11 @@ class LLMConfig:
     cache_ttl: int = 300
     request_interval: float = 1.0
     
+    # 🔥 新增：网络错误处理配置
+    network_retry_multiplier: float = 2.0  # 网络错误重试时间倍数
+    max_network_retry_delay: float = 120.0  # 最大网络重试延迟
+    enable_metrics: bool = True  # 是否启用指标收集
+    
     # 扩展配置
     extra_headers: Optional[Dict[str, str]] = None
     extra_params: Optional[Dict[str, Any]] = None
