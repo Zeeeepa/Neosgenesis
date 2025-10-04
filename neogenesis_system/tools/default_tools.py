@@ -14,6 +14,7 @@ Default Tools - 默认工具定义
 """
 
 from typing import Dict, Any, List, Optional
+from datetime import datetime
 from .tool_abstraction import tool, ToolCategory, ToolResult
 
 # 导入图像生成工具
@@ -27,8 +28,53 @@ except ImportError:
 # 核心工具函数 - 使用 @tool 装饰器实现统一抽象
 # ============================================================================
 
+@tool(category=ToolCategory.SYSTEM, name="get_current_time", overwrite=True)
+def get_current_time(format: str = "full") -> Dict[str, Any]:
+    """
+    获取当前的日期和时间信息
+    
+    这个工具返回当前的年份、月份、日期、时间等信息，
+    帮助生成与当前时间相关的内容和查询。
+    
+    Args:
+        format: 返回格式，支持以下选项：
+            - "full": 完整信息（年月日时分秒）
+            - "date": 仅日期（年月日）
+            - "year": 仅年份
+            - "datetime": ISO格式日期时间
+        
+    Returns:
+        包含当前时间信息的字典
+    """
+    now = datetime.now()
+    
+    result = {
+        "year": now.year,
+        "month": now.month,
+        "day": now.day,
+        "hour": now.hour,
+        "minute": now.minute,
+        "second": now.second,
+        "weekday": now.strftime("%A"),
+        "iso_format": now.isoformat(),
+        "timestamp": now.timestamp()
+    }
+    
+    if format == "full":
+        result["formatted"] = now.strftime("%Y年%m月%d日 %H:%M:%S")
+    elif format == "date":
+        result["formatted"] = now.strftime("%Y年%m月%d日")
+    elif format == "year":
+        result["formatted"] = str(now.year)
+    elif format == "datetime":
+        result["formatted"] = now.isoformat()
+    else:
+        result["formatted"] = now.strftime("%Y-%m-%d %H:%M:%S")
+    
+    return result
+
 @tool(category=ToolCategory.SYSTEM, name="idea_verification", overwrite=True)
-def verify_idea(idea: str, criteria: Optional[List[str]] = None) -> Dict[str, Any]:
+def verify_idea(idea: str = None, idea_text: str = None, criteria: Optional[List[str]] = None) -> Dict[str, Any]:
     """
     验证思想的可行性、新颖性和影响力
     
@@ -36,33 +82,41 @@ def verify_idea(idea: str, criteria: Optional[List[str]] = None) -> Dict[str, An
     提供量化的评分和具体的改进建议。
     
     Args:
-        idea: 要验证的思想或概念
+        idea: 要验证的思想或概念（主参数）
+        idea_text: 要验证的思想或概念（兼容参数）
         criteria: 验证标准列表，默认包括可行性、新颖性、影响力、清晰度
         
     Returns:
         包含验证结果、评分和建议的详细报告
     """
+    # 🔥 参数兼容性处理
+    actual_idea = idea or idea_text
+    if not actual_idea:
+        raise ValueError("必须提供 idea 或 idea_text 参数")
+    
     if criteria is None:
         criteria = ["feasibility", "novelty", "impact", "clarity"]
     
     # 基础验证逻辑（可扩展）
     results = {
-        "idea": idea,
+        "idea": actual_idea,
         "verification_results": {},
         "overall_score": 0.0,
-        "recommendations": []
+        "recommendations": [],
+        "feasibility_score": 0.0,  # 添加兼容字段
+        "analysis_summary": ""     # 添加兼容字段
     }
     
     for criterion in criteria:
         # 简化的评分逻辑（实际实现可以更复杂）
         if criterion == "feasibility":
-            score = 0.8 if len(idea.split()) > 5 else 0.5
+            score = 0.8 if len(actual_idea.split()) > 5 else 0.5
         elif criterion == "novelty":
-            score = 0.7 if "创新" in idea or "新" in idea else 0.6
+            score = 0.7 if "创新" in actual_idea or "新" in actual_idea else 0.6
         elif criterion == "impact":
-            score = 0.9 if "影响" in idea or "改进" in idea else 0.7
+            score = 0.9 if "影响" in actual_idea or "改进" in actual_idea else 0.7
         elif criterion == "clarity":
-            score = 0.8 if len(idea) > 20 else 0.6
+            score = 0.8 if len(actual_idea) > 20 else 0.6
         else:
             score = 0.7
         
@@ -70,6 +124,15 @@ def verify_idea(idea: str, criteria: Optional[List[str]] = None) -> Dict[str, An
     
     # 计算总体分数
     results["overall_score"] = sum(results["verification_results"].values()) / len(criteria)
+    
+    # 🔥 设置兼容字段
+    results["feasibility_score"] = results["verification_results"].get("feasibility", 0.5)
+    
+    # 生成分析摘要
+    analysis_parts = []
+    for criterion, score in results["verification_results"].items():
+        analysis_parts.append(f"{criterion}: {score:.2f}")
+    results["analysis_summary"] = f"验证结果 - {', '.join(analysis_parts)}。总体评分: {results['overall_score']:.2f}"
     
     # 生成建议
     if results["overall_score"] < 0.6:
@@ -260,6 +323,7 @@ def get_all_default_tools() -> List[str]:
         所有默认工具名称的列表
     """
     tool_names = [
+        "get_current_time",      # 时间查询工具（新增）
         "idea_verification",
         "search_knowledge", 
         "analyze_text"
