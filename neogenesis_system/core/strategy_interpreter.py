@@ -1394,25 +1394,35 @@ class ImprovedMockNeogenesisPlanner:
         
         # 默认回答 - 使用LLM或诚实说明限制，避免预设模板
         try:
-            # 尝试使用LLM生成简洁回答
-            from neogenesis_system.providers.impl.deepseek_client import DeepSeekClient, ClientConfig
+            # 🔥 修复：使用统一的LLMConfig而不是ClientConfig
+            from neogenesis_system.providers.llm_base import LLMConfig, LLMProvider
+            from neogenesis_system.providers.impl.deepseek_client import DeepSeekClient
             import os
             
             api_key = os.getenv('DEEPSEEK_API_KEY') or os.getenv('NEOGENESIS_API_KEY')
             if api_key:
-                client_config = ClientConfig(
+                llm_config = LLMConfig(
+                    provider=LLMProvider.DEEPSEEK,
                     api_key=api_key,
-                    model="deepseek-chat",
+                    model_name="deepseek-chat",
                     temperature=0.7,
-                    max_tokens=300
+                    max_tokens=300,
+                    base_url="https://api.deepseek.com/v1",
+                    timeout=(60, 300),
+                    max_retries=3,
+                    retry_delay_base=2.0,
+                    enable_cache=True,
+                    enable_metrics=False
                 )
-                client = DeepSeekClient(client_config)
+                client = DeepSeekClient(llm_config)
                 
                 prompt = f"""请简洁回答用户问题：{query}
 
 如果无法准确回答，请诚实说明限制。保持友好语气："""
                 
-                api_response = client.simple_chat(prompt=prompt, max_tokens=300, temperature=0.7)
+                # 使用chat_completion而不是simple_chat
+                messages = [{"role": "user", "content": prompt}]
+                api_response = client.chat_completion(messages=messages, max_tokens=300, temperature=0.7)
                 llm_response = api_response.content if hasattr(api_response, 'content') else str(api_response)
                 
                 if llm_response and llm_response.strip():
@@ -1420,6 +1430,7 @@ class ImprovedMockNeogenesisPlanner:
                     
         except Exception as e:
             logger.warning(f"⚠️ 策略解释器默认LLM调用失败: {e}")
+            logger.debug(f"   错误详情: {type(e).__name__}: {str(e)}")
         
         # 最终诚实回答 - 不使用预设模板
         if "时间" in query_lower or "几点" in query_lower:
