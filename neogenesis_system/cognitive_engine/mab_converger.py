@@ -2,10 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-MAB收敛器 - 阶段三：思维路径选择器
-负责从多个思维路径中选择最优路径的多臂老虎机算法
-MAB Converger - Stage 3: Reasoning Path Selector
-Responsible for selecting optimal reasoning path from multiple paths using MAB algorithms
+上下文多臂老虎机收敛器 (Contextual MAB Converger)
+Contextual Multi-Armed Bandit Converger for intelligent strategy selection
+
+核心升级：
+1. 从传统MAB升级为上下文Bandit (LinUCB, Contextual Thompson Sampling)
+2. 集成可验证推理系统 (Claim → Evidence → ActionContract)
+3. 基于任务上下文特征的智能策略选择
+4. 持久化学习参数存储和工具健康监控
+5. 可验证的成功信号定义和预算管理
 """
 
 import time
@@ -16,6 +21,14 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 from .data_structures import EnhancedDecisionArm, ReasoningPath
+from .contextual_bandit import (
+    ContextualBanditManager, ContextFeatures, ActionOutcome, SuccessMetric
+)
+from .verified_reasoning import (
+    VerifiedReasoningEngine, ClaimType, EvidenceType, ContractStatus
+)
+from .semantic_analyzer import SemanticAnalyzer, AnalysisTaskType
+
 try:
     from neogenesis_system.config import MAB_CONFIG
 except ImportError:
@@ -23,120 +36,523 @@ except ImportError:
         from ..config import MAB_CONFIG
     except ImportError:
         MAB_CONFIG = {
-            "convergence_threshold": 0.95,
-            "min_samples": 10
+            "convergence_threshold": 0.05,
+            "min_samples": 10,
+            "cold_start_threshold": {
+                "min_usage_count": 5,
+                "min_reliability_score": 0.6,
+                "max_idle_hours": 24,
+                "min_sample_size": 10,
+                "exploration_trigger_threshold": 0.7,
+                "detection_weights": {
+                    "usage_frequency": 0.3,
+                    "reliability": 0.3,
+                    "recency": 0.2,
+                    "sample_sufficiency": 0.2
+                }
+            }
         }
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class MABConverger:
-    """MAB收敛器 - 阶段三：思维路径选择器"""
+class ContextualMABConverger:
+    """上下文多臂老虎机收敛器 - 升级版思维路径选择器"""
     
-    def __init__(self):
-        # 改为存储路径级别的决策臂：path_id -> EnhancedDecisionArm
-        self.path_arms: Dict[str, EnhancedDecisionArm] = {}
-        self.convergence_threshold = MAB_CONFIG["convergence_threshold"]  # 收敛阈值
-        self.min_samples = MAB_CONFIG["min_samples"]  # 最小样本数
-        
-        # 🔧 新增：工具级别的决策臂存储：tool_id -> EnhancedDecisionArm
-        self.tool_arms: Dict[str, EnhancedDecisionArm] = {}
-        self.tool_selection_history = []  # 工具选择历史
-        self.total_tool_selections = 0  # 总工具选择次数
-        
-        # 算法选择策略
-        self.algorithm_preferences = {
-            'thompson_sampling': 0.4,
-            'ucb_variant': 0.35,
-            'epsilon_greedy': 0.25
-        }
-        
-        # 路径级别的性能统计
-        self.algorithm_performance = defaultdict(lambda: {'successes': 0, 'total': 0})
-        self.path_selection_history = []  # 路径选择历史
-        self.total_path_selections = 0  # 总路径选择次数
-        
-        # 🔧 新增：工具级别的性能统计
-        self.tool_algorithm_performance = defaultdict(lambda: {'successes': 0, 'total': 0})
-        
-        # 🏆 黄金决策模板系统
-        self.golden_templates: Dict[str, Dict[str, any]] = {}  # 存储黄金模板
-        self.golden_template_config = {
-            'success_rate_threshold': 0.90,  # 成功率阈值90%
-            'min_samples_required': 20,      # 最小样本数20次
-            'confidence_threshold': 0.95,    # 置信度阈值
-            'stability_check_window': 10,    # 稳定性检查窗口
-            'max_golden_templates': 50       # 最大黄金模板数量
-        }
-        self.template_usage_stats = defaultdict(int)  # 黄金模板使用统计
-        self.template_match_history = []  # 模板匹配历史
-        
-        # 🔧 改进方案：采用动态创建策略，在需要时自动创建决策臂
-        
-        # 🔍 新增：知识来源追踪系统
-        self.feedback_source_tracking = {
-            "retrospection": {"count": 0, "success_rate": 0.0, "avg_reward": 0.0},
-            "user_feedback": {"count": 0, "success_rate": 0.0, "avg_reward": 0.0},
-            "auto_evaluation": {"count": 0, "success_rate": 0.0, "avg_reward": 0.0},
-            "tool_verification": {"count": 0, "success_rate": 0.0, "avg_reward": 0.0}
-        }
-        self.source_weight_config = {
-            "retrospection": 0.8,      # 回溯分析权重（初始探索奖励）
-            "user_feedback": 1.0,      # 用户反馈权重（标准权重）
-            "auto_evaluation": 0.6,    # 自动评估权重
-            "tool_verification": 0.9   # 工具验证权重
-        }
-        
-        # 🎭 新增：试炼场系统 - 新思想的完整生命周期管理
-        self.trial_ground = {
-            "learned_paths": {},       # 学习路径注册表: strategy_id -> metadata
-            "trial_history": [],       # 试炼历史记录
-            "promotion_candidates": set(),  # 黄金模板候选路径
-            "culling_candidates": set(),    # 淘汰候选路径
-            "exploration_boost_active": {},  # 正在享受探索增强的路径: strategy_id -> remaining_boosts
-            "performance_watch_list": {},   # 性能监控列表: strategy_id -> watch_data
-            "culled_paths": []             # 淘汰历史记录
-        }
-        
-        # 试炼场配置
-        self.trial_config = {
-            "exploration_boost_rounds": 10,        # 新路径享受探索增强的轮数
-            "promotion_evaluation_window": 15,     # 提升评估窗口（最近N次表现）
-            "culling_threshold": 0.25,             # 淘汰阈值（成功率低于此值考虑淘汰）
-            "culling_min_samples": 20,             # 淘汰前的最少试验次数
-            "learned_path_bonus": 0.15,            # 学习路径额外探索奖励
-            "golden_promotion_threshold": 0.85,    # 黄金模板提升阈值
-            "learned_path_protection_time": 3600,  # 学习路径保护时间（秒）
-            "max_culled_history": 100,             # 最大淘汰历史记录数
-            "consecutive_failures_limit": 10       # 连续失败淘汰限制
-        }
-        
-        logger.info("🎰 MABConverger 已初始化 - 双层学习模式：思维路径 + 工具选择")
-        logger.info("🏆 黄金决策模板系统已启用")
-        logger.info("🔧 工具选择MAB系统已就绪")
-        logger.info("🔍 知识来源追踪系统已激活")
-        logger.info("🎭 试炼场系统已就绪 - 新思想的成长摇篮")
-    
-    def _create_strategy_arm_if_missing(self, strategy_id: str, path_type: str = None, 
-                                       path_source: str = "unknown", reasoning_path: 'ReasoningPath' = None) -> EnhancedDecisionArm:
+    def __init__(self, tool_registry=None, algorithm: str = "linucb", 
+                 storage_path: str = "contextual_bandit.db",
+                 global_budget: Dict[str, float] = None):
         """
-        🌟 增强版动态策略决策臂创建器 - 新思想的试炼场入口
-        
-        这是新思想进入MAB系统的关键入口，负责：
-        1. 识别路径来源（静态模板 vs 动态学习）
-        2. 为不同来源的路径设置适当的初始参数
-        3. 激活新思想的探索增强机制
+        初始化上下文MAB收敛器
         
         Args:
-            strategy_id: 策略ID
-            path_type: 路径类型（可选，如果未提供则自动推断）
-            path_source: 路径来源 ("static_template", "learned_exploration", "manual_addition", "unknown")
-            reasoning_path: 完整的推理路径对象（包含更多元数据）
+            tool_registry: 工具注册表
+            algorithm: 使用的算法 ("linucb" 或 "thompson")
+            storage_path: 持久化存储路径
+            global_budget: 全局预算配置
+        """
+        # 🎯 上下文Bandit系统
+        self.contextual_bandit = ContextualBanditManager(
+            feature_dim=8,
+            algorithm=algorithm,
+            storage_path=storage_path
+        )
+        
+        # 🔬 可验证推理引擎
+        self.reasoning_engine = VerifiedReasoningEngine(
+            tool_registry=tool_registry,
+            global_budget=global_budget
+        )
+        
+        # 🧠 语义分析器
+        self.semantic_analyzer = SemanticAnalyzer()
+        logger.info("🧠 语义分析器已初始化")
+        
+        # 🏆 保留黄金模板系统（升级版）
+        self.golden_templates: Dict[str, Dict[str, Any]] = {}
+        self.golden_template_config = {
+            'success_rate_threshold': 0.90,
+            'min_samples_required': 20,
+            'confidence_threshold': 0.95,
+            'max_golden_templates': 50
+        }
+        self.template_usage_stats = defaultdict(int)
+        
+        # 📊 性能统计
+        self.selection_history = []
+        self.total_selections = 0
+        self.context_feature_stats = defaultdict(list)
+        
+        # 🎭 试炼场系统（保持兼容性）
+        self.trial_ground = {
+            "learned_paths": {},
+            "exploration_boost_active": {},
+            "culling_candidates": set(),
+            "promotion_candidates": set(),
+            "performance_watch_list": {},
+            "trial_history": [],
+            "culled_paths": []
+        }
+        
+        self.trial_config = {
+            "exploration_boost_rounds": 10,
+            "learned_path_bonus": 0.2,
+            "culling_threshold": 0.3,
+            "culling_min_samples": 15,
+            "max_culled_history": 100
+        }
+        
+        logger.info("🎭 [试炼场] 试炼场系统已初始化")
+        logger.info(f"🎭 [试炼场] 配置: 探索增强{self.trial_config['exploration_boost_rounds']}轮, 学习路径奖励{self.trial_config['learned_path_bonus']:.1%}")
+        
+        # 🏆 黄金模板系统（保持兼容性）
+        self.template_match_history = []
+        
+        # 📊 反馈来源追踪
+        self.feedback_source_tracking = defaultdict(lambda: {
+            "count": 0,
+            "success_rate": 0.0,
+            "avg_reward": 0.0
+        })
+        
+        self.source_weight_config = {
+            "user_feedback": 1.0,
+            "retrospection": 1.2,
+            "auto_evaluation": 0.8,
+            "tool_verification": 1.1,
+            "contextual_bandit": 1.0
+        }
+        
+        # 🔧 传统MAB兼容性
+        self.path_arms = {}  # 路径决策臂
+        self.tool_arms = {}  # 工具决策臂
+        self.path_selection_history = []
+        self.total_path_selections = 0
+        self.tool_selection_history = []
+        self.total_tool_selections = 0
+        self.algorithm_performance = defaultdict(lambda: {'successes': 0, 'total': 0})
+        self.tool_algorithm_performance = defaultdict(lambda: {'successes': 0, 'total': 0})
+        
+        # 🔧 工具健康监控
+        self.tool_health_cache = {}
+        self.health_check_interval = 300  # 5分钟
+        
+        # 配置参数
+        self.convergence_threshold = MAB_CONFIG.get("convergence_threshold", 0.05)
+        self.min_samples = MAB_CONFIG.get("min_samples", 10)
+        
+        logger.info("🎯 ContextualMABConverger 已初始化")
+        logger.info(f"   算法: {algorithm}")
+        logger.info(f"   存储路径: {storage_path}")
+        logger.info("🔬 可验证推理引擎已启用")
+        logger.info("🏆 黄金模板系统已升级")
+    
+    def extract_context_features(self, user_query: str, execution_context: Optional[Dict] = None,
+                                available_tools: List[str] = None) -> ContextFeatures:
+        """
+        🎯 提取上下文特征向量
+        
+        构造上下文特征向量 x：
+        - 任务签名（意图、领域、复杂度）
+        - 工具可达性（健康检查/延迟/速率限制）
+        - 输入统计（长度、结构）
+        - 历史绩效（该意图下某工具/策略的成功率）
+        
+        Args:
+            user_query: 用户查询
+            execution_context: 执行上下文
+            available_tools: 可用工具列表
             
         Returns:
-            对应的决策臂，已针对路径来源进行优化初始化
+            上下文特征对象
         """
+        # 1. 任务签名特征
+        task_features = self._extract_task_signature(user_query)
+        
+        # 2. 工具可达性特征
+        tool_features = self._extract_tool_availability(available_tools or [])
+        
+        # 3. 输入统计特征
+        input_features = self._extract_input_statistics(user_query, execution_context)
+        
+        # 4. 历史绩效特征
+        history_features = self._extract_historical_performance(user_query, execution_context)
+        
+        # 5. 环境特征
+        env_features = self._extract_environment_features(execution_context)
+        
+        # 构造完整的上下文特征向量
+        context_features = ContextFeatures(
+            task_intent=task_features['intent'],
+            task_domain=task_features['domain'],
+            task_complexity=task_features['complexity'],
+            input_length=input_features['length'],
+            input_structure_score=input_features['structure'],  # 修复参数名
+            # 工具特征映射到正确的字段
+            tool_health_scores={tool: tool_features['health_score'] for tool in (available_tools or [])},
+            # 历史特征映射到正确的字段
+            historical_success_rates={path: history_features['success_rate'] for path in ['default']},
+            # 环境特征映射到正确的字段
+            network_quality=min(1.0, max(0.0, 1.0 - env_features['network_latency'] / 1000.0)),  # 转换延迟为质量分数
+            system_load=env_features['resource_usage'],
+            time_budget=env_features.get('time_pressure', 30.0)
+        )
+        
+        logger.debug(f"🎯 提取上下文特征: {context_features}")
+        return context_features
+    
+    def _extract_task_signature(self, user_query: str) -> Dict[str, Any]:
+        """
+        基于LLM的智能任务签名提取
+        
+        使用语义分析器进行深度理解，替代简单的关键词匹配
+        """
+        try:
+            # 这里使用语义分析器进行多维度分析
+            analysis_tasks = ['intent_detection', 'domain_classification', 'complexity_assessment']
+            semantic_response = self.semantic_analyzer.analyze(user_query, analysis_tasks)
+            
+            # 提取分析结果
+            intent = 'general'
+            domain = 'general'
+            complexity = 0.5
+            
+            if semantic_response.overall_success:
+                # 这里是意图识别结果
+                intent_result = semantic_response.analysis_results.get('intent_detection')
+                if intent_result and intent_result.success and intent_result.confidence > 0.6:
+                    primary_intent = intent_result.result.get('primary_intent', '')
+                    intent = self._map_semantic_intent_to_category(primary_intent)
+                    logger.debug(f"🧠 语义意图识别: {primary_intent} -> {intent} (置信度: {intent_result.confidence:.3f})")
+                
+                # 这里是领域分类结果
+                domain_result = semantic_response.analysis_results.get('domain_classification')
+                if domain_result and domain_result.success and domain_result.confidence > 0.6:
+                    primary_domain = domain_result.result.get('primary_domain', '')
+                    domain = self._map_semantic_domain_to_category(primary_domain)
+                    logger.debug(f"🧠 语义领域分类: {primary_domain} -> {domain} (置信度: {domain_result.confidence:.3f})")
+                
+                # 这里是复杂度评估结果
+                complexity_result = semantic_response.analysis_results.get('complexity_assessment')
+                if complexity_result and complexity_result.success and complexity_result.confidence > 0.6:
+                    complexity_score = complexity_result.result.get('complexity_score', 0.5)
+                    complexity = float(complexity_score)
+                    logger.debug(f"🧠 语义复杂度评估: {complexity:.3f} (置信度: {complexity_result.confidence:.3f})")
+                
+                logger.info(f"🧠 语义分析成功: 意图={intent}, 领域={domain}, 复杂度={complexity:.3f}")
+            else:
+                logger.warning("⚠️ 语义分析未完全成功，使用回退方案")
+                # 回退到简化的关键词匹配
+                intent, domain, complexity = self._fallback_keyword_analysis(user_query)
+                
+        except Exception as e:
+            logger.error(f"❌ 语义分析异常: {e}")
+            # 异常情况下使用回退方案
+            intent, domain, complexity = self._fallback_keyword_analysis(user_query)
+        
+        return {
+            'intent': intent,
+            'domain': domain,
+            'complexity': complexity
+        }
+    
+    def _map_semantic_intent_to_category(self, semantic_intent: str) -> str:
+        """将语义分析的意图映射到标准类别"""
+        intent_mapping = {
+            # 搜索相关
+            '信息查询': 'search',
+            '搜索': 'search',
+            '查找': 'search',
+            '寻找': 'search',
+            'information_seeking': 'search',
+            'search': 'search',
+            
+            # 分析相关
+            '分析': 'analysis',
+            '研究': 'analysis',
+            '解析': 'analysis',
+            '评估': 'analysis',
+            'analysis': 'analysis',
+            'research': 'analysis',
+            
+            # 创建相关
+            '创建': 'creation',
+            '生成': 'creation',
+            '制作': 'creation',
+            '设计': 'creation',
+            'creation': 'creation',
+            'generation': 'creation',
+            
+            # 修改相关
+            '修改': 'modification',
+            '更新': 'modification',
+            '编辑': 'modification',
+            '改进': 'modification',
+            'modification': 'modification',
+            'update': 'modification',
+            
+            # 解释相关
+            '解释': 'explanation',
+            '说明': 'explanation',
+            '阐述': 'explanation',
+            '教学': 'explanation',
+            'explanation': 'explanation',
+            'clarification': 'explanation'
+        }
+        
+        # 模糊匹配
+        semantic_lower = semantic_intent.lower()
+        for key, category in intent_mapping.items():
+            if key.lower() in semantic_lower or semantic_lower in key.lower():
+                return category
+        
+        return 'general'
+    
+    def _map_semantic_domain_to_category(self, semantic_domain: str) -> str:
+        """将语义分析的领域映射到标准类别"""
+        domain_mapping = {
+            # 技术相关
+            '技术': 'technical',
+            '编程': 'technical',
+            '开发': 'technical',
+            '计算机': 'technical',
+            '软件': 'technical',
+            'programming': 'technical',
+            'technology': 'technical',
+            'software': 'technical',
+            'ai': 'technical',
+            
+            # 商业相关
+            '商业': 'business',
+            '业务': 'business',
+            '管理': 'business',
+            '营销': 'business',
+            '金融': 'business',
+            'business': 'business',
+            'management': 'business',
+            'marketing': 'business',
+            'finance': 'business',
+            
+            # 学术相关
+            '学术': 'academic',
+            '研究': 'academic',
+            '科学': 'academic',
+            '理论': 'academic',
+            'academic': 'academic',
+            'research': 'academic',
+            'science': 'academic',
+            
+            # 创意相关
+            '创意': 'creative',
+            '设计': 'creative',
+            '艺术': 'creative',
+            '写作': 'creative',
+            'creative': 'creative',
+            'design': 'creative',
+            'art': 'creative',
+            'writing': 'creative'
+        }
+        
+        # 模糊匹配
+        domain_lower = semantic_domain.lower()
+        for key, category in domain_mapping.items():
+            if key.lower() in domain_lower or domain_lower in key.lower():
+                return category
+        
+        return 'general'
+    
+    def _fallback_keyword_analysis(self, user_query: str) -> Tuple[str, str, float]:
+        """回退的关键词分析方法"""
+        logger.debug("🔄 使用回退关键词分析")
+        
+        query_lower = user_query.lower()
+        
+        # 简化的意图识别
+        if any(word in query_lower for word in ['搜索', '查找', '寻找', 'search', 'find']):
+            intent = 'search'
+        elif any(word in query_lower for word in ['分析', '研究', 'analyze', 'study']):
+            intent = 'analysis'
+        elif any(word in query_lower for word in ['创建', '生成', 'create', 'generate']):
+            intent = 'creation'
+        elif any(word in query_lower for word in ['修改', '更新', 'modify', 'update']):
+            intent = 'modification'
+        elif any(word in query_lower for word in ['解释', '说明', 'explain', 'describe']):
+            intent = 'explanation'
+        else:
+            intent = 'general'
+        
+        # 简化的领域识别
+        if any(word in query_lower for word in ['代码', '编程', 'code', 'programming']):
+            domain = 'technical'
+        elif any(word in query_lower for word in ['业务', '商业', 'business']):
+            domain = 'business'
+        elif any(word in query_lower for word in ['学术', '研究', 'academic', 'research']):
+            domain = 'academic'
+        elif any(word in query_lower for word in ['创意', '设计', 'creative', 'design']):
+            domain = 'creative'
+        else:
+            domain = 'general'
+        
+        # 简化的复杂度评估
+        complexity_factors = [
+            len(user_query) > 200,
+            '?' in user_query and user_query.count('?') > 1,
+            any(word in query_lower for word in ['复杂', '详细', 'complex', 'detailed']),
+            any(word in query_lower for word in ['步骤', '流程', 'steps', 'process'])
+        ]
+        complexity = sum(complexity_factors) / len(complexity_factors)
+        
+        return intent, domain, complexity
+    
+    def _extract_tool_availability(self, available_tools: List[str]) -> Dict[str, float]:
+        """提取工具可达性特征"""
+        if not available_tools:
+            return {'availability_score': 0.0, 'health_score': 0.0}
+        
+        # 检查工具健康状态
+        healthy_tools = 0
+        total_health_score = 0.0
+        
+        for tool in available_tools:
+            health_status = self._check_tool_health(tool)
+            if health_status['is_healthy']:
+                healthy_tools += 1
+            total_health_score += health_status['health_score']
+        
+        availability_score = len(available_tools) / 10.0  # 假设10个工具为满分
+        health_score = total_health_score / len(available_tools) if available_tools else 0.0
+        
+        return {
+            'availability_score': min(availability_score, 1.0),
+            'health_score': health_score
+        }
+    
+    def _check_tool_health(self, tool_name: str) -> Dict[str, Any]:
+        """检查工具健康状态"""
+        current_time = time.time()
+        
+        # 从缓存中获取健康状态
+        if tool_name in self.tool_health_cache:
+            cached_data = self.tool_health_cache[tool_name]
+            if current_time - cached_data['timestamp'] < self.health_check_interval:
+                return cached_data['status']
+        
+        # 执行健康检查
+        health_status = {
+            'is_healthy': True,
+            'health_score': 1.0,
+            'latency': 0.0,
+            'error_rate': 0.0
+        }
+        
+        # 基于工具使用历史评估健康状态
+        if tool_name in self.tool_arms:
+            arm = self.tool_arms[tool_name]
+            if arm.activation_count > 0:
+                health_status['health_score'] = arm.success_rate
+                health_status['is_healthy'] = arm.success_rate > 0.5
+                
+                # 基于最近失败率调整
+                if arm.recent_results:
+                    recent_failures = sum(1 for r in arm.recent_results[-10:] if not r)
+                    health_status['error_rate'] = recent_failures / min(len(arm.recent_results), 10)
+        
+        # 缓存结果
+        self.tool_health_cache[tool_name] = {
+            'timestamp': current_time,
+            'status': health_status
+        }
+        
+        return health_status
+    
+    def _extract_input_statistics(self, user_query: str, execution_context: Optional[Dict]) -> Dict[str, Any]:
+        """提取输入统计特征"""
+        # 查询长度特征
+        length_score = min(len(user_query) / 500.0, 1.0)  # 500字符为满分
+        
+        # 结构复杂度
+        structure_factors = [
+            user_query.count('\n') > 0,  # 多行
+            user_query.count('.') > 2,   # 多句
+            user_query.count(',') > 3,   # 复杂句式
+            bool(execution_context and len(execution_context) > 3)  # 丰富上下文
+        ]
+        
+        structure_score = sum(structure_factors) / len(structure_factors)
+        
+        return {
+            'length': length_score,
+            'structure': structure_score
+        }
+    
+    def _extract_historical_performance(self, user_query: str, execution_context: Optional[Dict]) -> Dict[str, float]:
+        """提取历史绩效特征"""
+        # 基于查询相似性计算历史成功率
+        if not self.path_arms:
+            return {'success_rate': 0.5}  # 默认中等成功率
+        
+        # 简单的相似性匹配
+        query_words = set(user_query.lower().split())
+        similar_paths = []
+        
+        for path_id, arm in self.path_arms.items():
+            # 基于路径类型匹配
+            path_words = set(arm.option.lower().split())
+            similarity = len(query_words.intersection(path_words)) / len(query_words.union(path_words)) if query_words.union(path_words) else 0
+            
+            if similarity > 0.1:  # 有一定相似性
+                similar_paths.append((similarity, arm.success_rate))
+        
+        if similar_paths:
+            # 加权平均成功率
+            weighted_success = sum(sim * rate for sim, rate in similar_paths)
+            total_weight = sum(sim for sim, _ in similar_paths)
+            return {'success_rate': weighted_success / total_weight}
+        
+        return {'success_rate': 0.5}
+    
+    def _extract_environment_features(self, execution_context: Optional[Dict]) -> Dict[str, float]:
+        """提取环境特征"""
+        if not execution_context:
+            return {
+                'network_latency': 0.5,
+                'resource_usage': 0.5,
+                'time_pressure': 0.5
+            }
+        
+        # 从执行上下文中提取环境信息
+        network_latency = execution_context.get('network_latency', 0.5)
+        resource_usage = execution_context.get('resource_usage', 0.5)
+        time_pressure = execution_context.get('time_pressure', 0.5)
+        
+        return {
+            'network_latency': network_latency,
+            'resource_usage': resource_usage,
+            'time_pressure': time_pressure
+        }
+
+    def _create_strategy_arm_if_missing(self, strategy_id: str, path_type: str = None, 
+                                       path_source: str = "unknown", reasoning_path: 'ReasoningPath' = None) -> EnhancedDecisionArm:
         if strategy_id not in self.path_arms:
             if path_type is None:
                 # 自动推断路径类型
@@ -175,14 +591,729 @@ class MABConverger:
                 
             else:
                 # 静态模板或未知来源保持默认初始化
-                logger.debug(f"🆕 动态创建策略决策臂: {strategy_id} ({path_type}) [来源: {effective_source}]")
+                logger.info(f"🆕 [MAB] 创建策略决策臂: {strategy_id} ({path_type}) [来源: {effective_source}]")
+                if effective_source in ["static_template", "unknown"]:
+                    logger.info(f"ℹ️  [试炼场] 静态模板路径不进入探索增强期，直接参与正常竞争")
             
             self.path_arms[strategy_id] = new_arm
             
-            # 记录到试炼场历史
+            # 记录到试炼场历史（所有路径都会记录）
             self._record_trial_entry(strategy_id, path_type, effective_source)
         
         return self.path_arms[strategy_id]
+    
+    def contextual_select_best_path(self, paths: List[ReasoningPath], user_query: str, 
+                                   execution_context: Optional[Dict] = None,
+                                   available_tools: List[str] = None) -> ReasoningPath:
+        """
+        🎯 上下文Bandit路径选择 - 核心升级方法
+        
+        使用上下文特征进行智能路径选择，支持LinUCB和Contextual Thompson Sampling
+        
+        Args:
+            paths: 候选思维路径列表
+            user_query: 用户查询
+            execution_context: 执行上下文
+            available_tools: 可用工具列表
+            
+        Returns:
+            选择的最优思维路径
+        """
+        if not paths:
+            raise ValueError("路径列表不能为空")
+        
+        if len(paths) == 1:
+            logger.info(f"🎯 只有一个路径，直接选择: {paths[0].path_type}")
+            return paths[0]
+        
+        # 🎯 提取上下文特征
+        context_features = self.extract_context_features(user_query, execution_context, available_tools)
+        
+        # 🔬 可验证推理预检查
+        verified_paths = self._verify_paths_preconditions(paths, context_features)
+        if not verified_paths:
+            logger.warning("⚠️ 所有路径都未通过预条件检查，使用原始路径列表")
+            verified_paths = paths
+        
+        # 🏆 黄金模板优先检查
+        golden_match = self._check_golden_template_match(verified_paths)
+        if golden_match:
+            selected_path = golden_match['path']
+            template_id = golden_match['template_id']
+            
+            logger.info(f"🏆 黄金模板匹配成功: {template_id} -> {selected_path.path_type}")
+            return selected_path
+        
+        # 🎯 上下文Bandit选择
+        try:
+            # 准备动作列表（路径策略ID）
+            actions = [path.strategy_id for path in verified_paths]
+            strategy_to_path_mapping = {path.strategy_id: path for path in verified_paths}
+            
+            # 使用上下文Bandit进行选择 - 修复返回值解包问题
+            selected_action, confidence, selection_info = self.contextual_bandit.select_action(context_features, actions)
+            selected_path = strategy_to_path_mapping[selected_action]
+            
+            # 更新选择统计
+            self.total_selections += 1
+            self.selection_history.append({
+                'path_id': selected_action,
+                'path_type': selected_path.path_type,
+                'algorithm': 'contextual_bandit',
+                'context_features': context_features.to_dict(),
+                'timestamp': time.time(),
+                'selection_round': self.total_selections
+            })
+            
+            logger.info(f"🎯 上下文Bandit选择: {selected_path.path_type} (策略ID: {selected_action})")
+            logger.debug(f"   上下文特征: 意图={context_features.task_intent}, 领域={context_features.task_domain}")
+            
+            return selected_path
+            
+        except Exception as e:
+            logger.error(f"❌ 上下文Bandit选择失败: {e}")
+            # 回退到传统MAB选择
+            return self.select_best_path(verified_paths, 'auto')
+    
+    def _verify_paths_preconditions(self, paths: List[ReasoningPath], 
+                                   context_features: ContextFeatures) -> List[ReasoningPath]:
+        """
+        🔬 可验证推理：预条件检查
+        
+        Args:
+            paths: 候选路径列表
+            context_features: 上下文特征
+            
+        Returns:
+            通过预条件检查的路径列表
+        """
+        verified_paths = []
+        
+        for path in paths:
+            try:
+                # 创建推理声明 - 修复方法名错误
+                if not hasattr(self.reasoning_engine, 'reasoning_chains'):
+                    # 如果没有推理链，先创建一个
+                    chain_id = self.reasoning_engine.create_reasoning_chain(f"路径验证_{int(time.time())}")
+                else:
+                    # 使用已有的推理链或创建新的
+                    chain_id = f"path_verification_{int(time.time())}"
+                    if chain_id not in self.reasoning_engine.reasoning_chains:
+                        chain_id = self.reasoning_engine.create_reasoning_chain(f"路径验证_{int(time.time())}")
+                
+                # 使用正确的方法名add_claim
+                from neogenesis_system.cognitive_engine.verified_reasoning import ClaimType
+                claim_id = self.reasoning_engine.add_claim(
+                    chain_id=chain_id,
+                    claim_type=ClaimType.PROCEDURAL,
+                    statement=f"路径 {path.path_type} 适用于当前任务",
+                    confidence=0.8
+                )
+                
+                # 收集证据 - 修复方法名错误和枚举值错误
+                evidence_id = self.reasoning_engine.add_evidence(
+                    chain_id=chain_id,
+                    claim_id=claim_id,
+                    evidence_type=EvidenceType.TOOL_OUTPUT,  # 修复：使用存在的枚举值
+                    verification_method="historical_performance_analysis",
+                    verification_target=f"path_{path.strategy_id}_performance",
+                    expected_result={
+                        'path_success_rate': self.path_arms.get(path.strategy_id, EnhancedDecisionArm('', '')).success_rate,
+                        'context_match': self._calculate_context_match(path, context_features),
+                        'tool_compatibility': self._check_tool_compatibility(path, context_features)
+                    }
+                )
+                
+                # 创建行动合约 - 修复方法名错误
+                # 获取路径性能数据用于合约参数
+                path_success_rate = self.path_arms.get(path.strategy_id, EnhancedDecisionArm('', '')).success_rate
+                context_match = self._calculate_context_match(path, context_features)
+                tool_compatibility = self._check_tool_compatibility(path, context_features)
+                
+                contract_id = self.reasoning_engine.add_action_contract(
+                    chain_id=chain_id,
+                    action_name="path_execution",
+                    tool_name=f"path_executor_{path.strategy_id}",
+                    arguments={
+                        'path_id': path.strategy_id,
+                        'path_type': path.path_type,
+                        'expected_success_rate': path_success_rate
+                    },
+                    preconditions=[
+                        f"工具兼容性 >= 0.5: {tool_compatibility:.2f}",
+                        f"上下文匹配度 >= 0.3: {context_match:.2f}"
+                    ],
+                    expected_outcomes=["任务成功完成", "用户满意度提升"]
+                )
+                
+                # 验证推理链 - 修复方法名错误
+                chain_valid, validation_summary = self.reasoning_engine.validate_reasoning_chain(chain_id)
+                
+                if chain_valid:
+                    verified_paths.append(path)
+                    logger.debug(f"✅ 路径 {path.path_type} 通过预条件检查")
+                else:
+                    logger.debug(f"❌ 路径 {path.path_type} 未通过预条件检查: {validation_summary}")
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ 路径 {path.path_type} 预条件检查异常: {e}")
+                # 异常情况下仍然包含该路径
+                verified_paths.append(path)
+        
+        return verified_paths
+    
+    def _calculate_context_match(self, path: ReasoningPath, context_features: ContextFeatures) -> float:
+        """计算路径与上下文的匹配度"""
+        # 基于路径类型和任务意图的匹配
+        path_type_lower = path.path_type.lower()
+        intent = context_features.task_intent
+        
+        # 意图-路径类型匹配规则
+        intent_path_match = {
+            'search': ['探索', '调研', 'investigative', 'exploratory'],
+            'analysis': ['分析', '系统', 'analytical', 'systematic'],
+            'creation': ['创新', '创造', 'creative', 'innovative'],
+            'modification': ['适应', '灵活', 'adaptive', 'flexible'],
+            'explanation': ['整体', '综合', 'comprehensive', 'holistic']
+        }
+        
+        match_score = 0.0
+        if intent in intent_path_match:
+            keywords = intent_path_match[intent]
+            for keyword in keywords:
+                if keyword in path_type_lower:
+                    match_score += 0.3
+                    break
+        
+        # 复杂度匹配
+        if context_features.task_complexity > 0.7 and '系统' in path_type_lower:
+            match_score += 0.2
+        elif context_features.task_complexity < 0.3 and '实用' in path_type_lower:
+            match_score += 0.2
+        
+        # 历史成功率加权
+        if path.strategy_id in self.path_arms:
+            historical_success = self.path_arms[path.strategy_id].success_rate
+            match_score += historical_success * 0.3
+        
+        return min(match_score, 1.0)
+    
+    def _check_tool_compatibility(self, path: ReasoningPath, context_features: ContextFeatures) -> float:
+        """检查路径与可用工具的兼容性"""
+        # 基于路径类型推断所需工具类型
+        path_tool_requirements = {
+            '探索调研型': ['search', 'web', 'database'],
+            '系统分析型': ['analysis', 'data', 'statistics'],
+            '创新突破型': ['generation', 'creative', 'brainstorm'],
+            '实用务实型': ['execution', 'automation', 'workflow'],
+            '整体综合型': ['integration', 'synthesis', 'summary']
+        }
+        
+        required_tools = path_tool_requirements.get(path.path_type, [])
+        if not required_tools:
+            return 0.8  # 默认兼容性
+        
+        # 检查工具可用性
+        available_score = context_features.tool_availability
+        health_score = context_features.tool_health_score
+        
+        # 综合兼容性评分
+        compatibility = (available_score * 0.6 + health_score * 0.4)
+        
+        return compatibility
+    
+    def update_contextual_feedback(self, path_id: str, context_features: ContextFeatures, 
+                                  success: bool, reward: float = 0.0, 
+                                  execution_result: Optional[Dict] = None):
+        """
+        🎯 更新上下文Bandit的反馈
+        
+        Args:
+            path_id: 路径ID
+            context_features: 上下文特征
+            success: 执行是否成功
+            reward: 奖励值
+            execution_result: 执行结果详情
+        """
+        try:
+            # 🔬 可验证推理：成功信号定义
+            verified_success = self._verify_success_signal(success, execution_result)
+            adjusted_reward = self._calculate_verified_reward(success, reward, execution_result)
+            
+            # 创建行动结果
+            outcome = ActionOutcome(
+                action_id=path_id,  # 修复参数名：action -> action_id
+                context_features=context_features,
+                success_metrics={SuccessMetric.EXECUTION_SUCCESS: adjusted_reward},  # 修复参数结构
+                execution_time=execution_result.get('execution_time', 0.0) if execution_result else 0.0,
+                cost=execution_result.get('cost', 0.0) if execution_result else 0.0,  # 添加必需的cost参数
+                timestamp=time.time(),  # 添加必需的timestamp参数
+                additional_info=execution_result or {}  # 添加额外信息
+            )
+            
+            # 更新上下文Bandit（方法更名：update_reward）
+            if hasattr(self.contextual_bandit, 'update_reward'):
+                self.contextual_bandit.update_reward(context_features, path_id, outcome)
+            else:
+                # 兼容旧接口
+                self.contextual_bandit.update_feedback(outcome)
+            
+            # 同时更新传统MAB系统（向后兼容）
+            self.update_path_performance(path_id, verified_success, adjusted_reward, "contextual_bandit")
+            
+            logger.info(f"🎯 上下文反馈更新: {path_id} -> 成功={verified_success}, 奖励={adjusted_reward:.3f}")
+            
+        except Exception as e:
+            logger.error(f"❌ 上下文反馈更新失败: {e}")
+            # 回退到传统更新
+            self.update_path_performance(path_id, success, reward, "fallback")
+    
+    def _verify_success_signal(self, raw_success: bool, execution_result: Optional[Dict]) -> bool:
+        """
+        🔬 可验证的成功信号定义
+        
+        不依赖LLM自评，而是基于客观指标判断成功
+        """
+        if not execution_result:
+            return raw_success
+        
+        # 多维度成功验证
+        success_indicators = []
+        
+        # 1. 执行完成度
+        completion_rate = execution_result.get('completion_rate', 1.0 if raw_success else 0.0)
+        success_indicators.append(completion_rate > 0.8)
+        
+        # 2. 错误率
+        error_rate = execution_result.get('error_rate', 0.0)
+        success_indicators.append(error_rate < 0.1)
+        
+        # 3. 用户满意度（如果有）
+        user_satisfaction = execution_result.get('user_satisfaction')
+        if user_satisfaction is not None:
+            success_indicators.append(user_satisfaction > 0.7)
+        
+        # 4. 时间效率
+        execution_time = execution_result.get('execution_time', 0.0)
+        expected_time = execution_result.get('expected_time', execution_time)
+        if expected_time > 0:
+            time_efficiency = min(expected_time / max(execution_time, 0.1), 1.0)
+            success_indicators.append(time_efficiency > 0.5)
+        
+        # 5. 资源使用效率
+        resource_usage = execution_result.get('resource_usage', 0.5)
+        success_indicators.append(resource_usage < 0.8)
+        
+        # 综合判断：至少70%的指标为正面
+        verified_success = sum(success_indicators) / len(success_indicators) >= 0.7
+        
+        if verified_success != raw_success:
+            logger.info(f"🔬 成功信号修正: 原始={raw_success} -> 验证后={verified_success}")
+        
+        return verified_success
+    
+    def _calculate_verified_reward(self, success: bool, raw_reward: float, 
+                                  execution_result: Optional[Dict]) -> float:
+        """计算验证后的奖励值"""
+        if not execution_result:
+            return raw_reward
+        
+        # 基础奖励
+        base_reward = 1.0 if success else -0.5
+        
+        # 效率奖励
+        efficiency_bonus = 0.0
+        execution_time = execution_result.get('execution_time', 0.0)
+        expected_time = execution_result.get('expected_time', execution_time)
+        if expected_time > 0 and execution_time > 0:
+            time_ratio = expected_time / execution_time
+            if time_ratio > 1.2:  # 比预期快20%以上
+                efficiency_bonus += 0.3
+            elif time_ratio < 0.8:  # 比预期慢20%以上
+                efficiency_bonus -= 0.2
+        
+        # 质量奖励
+        quality_bonus = 0.0
+        completion_rate = execution_result.get('completion_rate', 1.0 if success else 0.0)
+        quality_bonus += (completion_rate - 0.8) * 0.5  # 超过80%完成度的部分给奖励
+        
+        # 成本惩罚
+        cost_penalty = 0.0
+        cost = execution_result.get('cost', 0.0)
+        budget = execution_result.get('budget', cost)
+        if budget > 0 and cost > budget:
+            cost_penalty = -min((cost - budget) / budget, 0.5)  # 最多扣0.5分
+        
+        # 综合奖励
+        final_reward = base_reward + efficiency_bonus + quality_bonus + cost_penalty
+        
+        return max(-1.0, min(final_reward, 2.0))  # 限制在[-1, 2]范围内
+    
+    def get_contextual_bandit_stats(self) -> Dict[str, Any]:
+        """
+        🎯 获取上下文Bandit统计信息
+        
+        Returns:
+            上下文Bandit的详细统计数据
+        """
+        try:
+            bandit_stats = self.contextual_bandit.get_statistics()
+            
+            # 添加集成统计
+            integration_stats = {
+                'total_contextual_selections': len([h for h in self.selection_history if h.get('algorithm') == 'contextual_bandit']),
+                'contextual_success_rate': self._calculate_contextual_success_rate(),
+                'feature_importance': self._analyze_feature_importance(),
+                'context_distribution': self._analyze_context_distribution()
+            }
+            
+            return {
+                'bandit_core_stats': bandit_stats,
+                'integration_stats': integration_stats,
+                'verified_reasoning_stats': self.reasoning_engine.get_statistics() if hasattr(self.reasoning_engine, 'get_statistics') else {}
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ 获取上下文Bandit统计失败: {e}")
+            return {'error': str(e)}
+    
+    def _calculate_contextual_success_rate(self) -> float:
+        """计算上下文Bandit的成功率"""
+        contextual_selections = [h for h in self.selection_history if h.get('algorithm') == 'contextual_bandit']
+        if not contextual_selections:
+            return 0.0
+        
+        # 基于路径ID查找对应的成功率
+        success_rates = []
+        for selection in contextual_selections:
+            path_id = selection.get('path_id')
+            if path_id in self.path_arms:
+                success_rates.append(self.path_arms[path_id].success_rate)
+        
+        return sum(success_rates) / len(success_rates) if success_rates else 0.0
+    
+    def _analyze_feature_importance(self) -> Dict[str, float]:
+        """分析上下文特征的重要性"""
+        # 简化的特征重要性分析
+        feature_impact = {
+            'task_intent': 0.0,
+            'task_domain': 0.0,
+            'task_complexity': 0.0,
+            'tool_availability': 0.0,
+            'historical_success_rate': 0.0
+        }
+        
+        # 基于选择历史分析特征影响
+        contextual_selections = [h for h in self.selection_history if h.get('context_features')]
+        
+        if contextual_selections:
+            # 简单的相关性分析
+            for selection in contextual_selections:
+                features = selection.get('context_features', {})
+                path_id = selection.get('path_id')
+                
+                if path_id in self.path_arms:
+                    success_rate = self.path_arms[path_id].success_rate
+                    
+                    # 累积特征与成功率的相关性
+                    for feature_name in feature_impact.keys():
+                        feature_value = features.get(feature_name, 0.0)
+                        if isinstance(feature_value, (int, float)):
+                            feature_impact[feature_name] += feature_value * success_rate
+            
+            # 归一化
+            total_impact = sum(feature_impact.values())
+            if total_impact > 0:
+                feature_impact = {k: v / total_impact for k, v in feature_impact.items()}
+        
+        return feature_impact
+    
+    def _analyze_context_distribution(self) -> Dict[str, Any]:
+        """分析上下文特征分布"""
+        contextual_selections = [h for h in self.selection_history if h.get('context_features')]
+        
+        if not contextual_selections:
+            return {}
+        
+        # 统计各个特征的分布
+        intent_dist = defaultdict(int)
+        domain_dist = defaultdict(int)
+        complexity_dist = {'low': 0, 'medium': 0, 'high': 0}
+        
+        for selection in contextual_selections:
+            features = selection.get('context_features', {})
+            
+            # 意图分布
+            intent = features.get('task_intent', 'unknown')
+            intent_dist[intent] += 1
+            
+            # 领域分布
+            domain = features.get('task_domain', 'unknown')
+            domain_dist[domain] += 1
+            
+            # 复杂度分布
+            complexity = features.get('task_complexity', 0.5)
+            if complexity < 0.3:
+                complexity_dist['low'] += 1
+            elif complexity < 0.7:
+                complexity_dist['medium'] += 1
+            else:
+                complexity_dist['high'] += 1
+        
+        return {
+            'intent_distribution': dict(intent_dist),
+            'domain_distribution': dict(domain_dist),
+            'complexity_distribution': dict(complexity_dist),
+            'total_samples': len(contextual_selections)
+        }
+    
+    def get_verified_reasoning_report(self) -> Dict[str, Any]:
+        """
+        🔬 获取可验证推理报告
+        
+        Returns:
+            可验证推理系统的详细报告
+        """
+        try:
+            # 统计预条件检查结果
+            verification_stats = {
+                'total_verifications': 0,
+                'passed_verifications': 0,
+                'failed_verifications': 0,
+                'verification_success_rate': 0.0,
+                'common_failure_reasons': defaultdict(int),
+                'success_signal_corrections': 0
+            }
+            
+            # 从选择历史中统计验证数据
+            for selection in self.selection_history:
+                if 'verification_result' in selection:
+                    verification_stats['total_verifications'] += 1
+                    if selection['verification_result'].get('passed', False):
+                        verification_stats['passed_verifications'] += 1
+                    else:
+                        verification_stats['failed_verifications'] += 1
+                        reason = selection['verification_result'].get('reason', 'unknown')
+                        verification_stats['common_failure_reasons'][reason] += 1
+            
+            if verification_stats['total_verifications'] > 0:
+                verification_stats['verification_success_rate'] = (
+                    verification_stats['passed_verifications'] / verification_stats['total_verifications']
+                )
+            
+            # 获取推理引擎统计
+            reasoning_engine_stats = {}
+            if hasattr(self.reasoning_engine, 'get_statistics'):
+                reasoning_engine_stats = self.reasoning_engine.get_statistics()
+            
+            return {
+                'verification_stats': verification_stats,
+                'reasoning_engine_stats': reasoning_engine_stats,
+                'contract_validation_enabled': True,
+                'success_signal_verification_enabled': True
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ 获取可验证推理报告失败: {e}")
+            return {'error': str(e)}
+    
+    def get_comprehensive_system_status(self) -> Dict[str, Any]:
+        """
+        🎯 获取综合系统状态
+        
+        Returns:
+            包含所有子系统状态的综合报告
+        """
+        try:
+            return {
+                'timestamp': time.time(),
+                'system_mode': 'contextual_bandit_with_verified_reasoning',
+                
+                # 🎯 上下文Bandit状态
+                'contextual_bandit': self.get_contextual_bandit_stats(),
+                
+                # 🔬 可验证推理状态
+                'verified_reasoning': self.get_verified_reasoning_report(),
+                
+                # 🏆 黄金模板状态
+                'golden_templates': self.get_golden_template_stats(),
+                
+                # 🎭 试炼场状态
+                'trial_ground': self.get_trial_ground_analytics(),
+                
+                # 📊 传统MAB状态（向后兼容）
+                'traditional_mab': self.get_system_status(),
+                
+                # 🔧 工具健康状态
+                'tool_health': self._get_tool_health_summary(),
+                
+                # 📈 性能趋势
+                'performance_trends': self._get_performance_trends()
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ 获取综合系统状态失败: {e}")
+            return {'error': str(e), 'timestamp': time.time()}
+    
+    def _get_tool_health_summary(self) -> Dict[str, Any]:
+        """获取工具健康状态摘要"""
+        if not self.tool_health_cache:
+            return {'total_tools': 0, 'healthy_tools': 0, 'health_rate': 0.0}
+        
+        healthy_count = 0
+        total_count = len(self.tool_health_cache)
+        
+        for tool_name, cached_data in self.tool_health_cache.items():
+            if cached_data['status']['is_healthy']:
+                healthy_count += 1
+        
+        return {
+            'total_tools': total_count,
+            'healthy_tools': healthy_count,
+            'health_rate': healthy_count / total_count if total_count > 0 else 0.0,
+            'last_check_time': max(
+                (data['timestamp'] for data in self.tool_health_cache.values()),
+                default=0.0
+            )
+        }
+    
+    def _get_performance_trends(self) -> Dict[str, Any]:
+        """获取性能趋势分析"""
+        recent_selections = self.selection_history[-50:] if len(self.selection_history) > 50 else self.selection_history
+        
+        if not recent_selections:
+            return {'trend': 'insufficient_data'}
+        
+        # 分析最近的成功率趋势
+        success_rates = []
+        for selection in recent_selections:
+            path_id = selection.get('path_id')
+            if path_id in self.path_arms:
+                success_rates.append(self.path_arms[path_id].success_rate)
+        
+        if len(success_rates) < 10:
+            return {'trend': 'insufficient_data'}
+        
+        # 简单的趋势分析
+        first_half = success_rates[:len(success_rates)//2]
+        second_half = success_rates[len(success_rates)//2:]
+        
+        first_avg = sum(first_half) / len(first_half)
+        second_avg = sum(second_half) / len(second_half)
+        
+        if second_avg > first_avg + 0.05:
+            trend = 'improving'
+        elif second_avg < first_avg - 0.05:
+            trend = 'declining'
+        else:
+            trend = 'stable'
+        
+        return {
+            'trend': trend,
+            'recent_avg_success_rate': second_avg,
+            'improvement': second_avg - first_avg,
+            'sample_size': len(success_rates)
+        }
+    
+    def export_system_configuration(self) -> Dict[str, Any]:
+        """
+        🔧 导出系统配置
+        
+        Returns:
+            完整的系统配置数据
+        """
+        return {
+            'contextual_bandit_config': {
+                'algorithm': self.contextual_bandit.algorithm if hasattr(self.contextual_bandit, 'algorithm') else 'unknown',
+                'feature_dim': self.contextual_bandit.feature_dim if hasattr(self.contextual_bandit, 'feature_dim') else 8,
+                'storage_path': self.contextual_bandit.storage_path if hasattr(self.contextual_bandit, 'storage_path') else 'unknown'
+            },
+            'golden_template_config': self.golden_template_config,
+            'trial_config': self.trial_config,
+            'source_weight_config': self.source_weight_config,
+            'health_check_interval': self.health_check_interval,
+            'mab_config': MAB_CONFIG
+        }
+    
+    def demo_contextual_bandit_workflow(self, demo_query: str = "请分析一下人工智能在医疗领域的应用前景"):
+        """
+        🎯 演示上下文Bandit + 可验证推理的完整工作流程
+        
+        Args:
+            demo_query: 演示用的查询
+        """
+        logger.info("🎯 开始上下文Bandit + 可验证推理演示")
+        logger.info(f"📝 演示查询: {demo_query}")
+        
+        print("\n" + "="*80)
+        print("🎯 上下文多臂老虎机 + 可验证推理系统演示")
+        print("="*80)
+        
+        # 1. 展示语义分析能力
+        print("\n🧠 第一步：智能语义分析")
+        print("-" * 40)
+        
+        context_features = self.extract_context_features(demo_query)
+        print(f"✅ 任务意图: {context_features.task_intent}")
+        print(f"✅ 任务领域: {context_features.task_domain}")
+        print(f"✅ 复杂度评分: {context_features.task_complexity:.3f}")
+        print(f"✅ 输入长度评分: {context_features.input_length:.3f}")
+        
+        # 2. 展示上下文Bandit统计
+        print("\n🎯 第二步：上下文Bandit状态")
+        print("-" * 40)
+        
+        bandit_stats = self.get_contextual_bandit_stats()
+        print(f"✅ 上下文选择次数: {bandit_stats['integration_stats']['total_contextual_selections']}")
+        print(f"✅ 上下文成功率: {bandit_stats['integration_stats']['contextual_success_rate']:.3f}")
+        
+        feature_importance = bandit_stats['integration_stats']['feature_importance']
+        print("✅ 特征重要性分析:")
+        for feature, importance in feature_importance.items():
+            print(f"   - {feature}: {importance:.3f}")
+        
+        # 3. 展示可验证推理能力
+        print("\n🔬 第三步：可验证推理报告")
+        print("-" * 40)
+        
+        reasoning_report = self.get_verified_reasoning_report()
+        print(f"✅ 验证成功率: {reasoning_report['verification_stats']['verification_success_rate']:.3f}")
+        print(f"✅ 总验证次数: {reasoning_report['verification_stats']['total_verifications']}")
+        print("✅ 合约验证: 已启用")
+        print("✅ 成功信号验证: 已启用")
+        
+        # 4. 展示系统综合状态
+        print("\n📊 第四步：系统综合状态")
+        print("-" * 40)
+        
+        system_status = self.get_comprehensive_system_status()
+        print(f"✅ 系统模式: {system_status['system_mode']}")
+        print(f"✅ 工具健康率: {system_status['tool_health']['health_rate']:.1%}")
+        print(f"✅ 性能趋势: {system_status['performance_trends']['trend']}")
+        print(f"✅ 黄金模板数量: {system_status['golden_templates']['total_templates']}")
+        
+        # 5. 展示配置导出
+        print("\n🔧 第五步：系统配置")
+        print("-" * 40)
+        
+        config = self.export_system_configuration()
+        print(f"✅ 上下文Bandit算法: {config['contextual_bandit_config']['algorithm']}")
+        print(f"✅ 特征维度: {config['contextual_bandit_config']['feature_dim']}")
+        print(f"✅ 语义分析: 已集成")
+        print(f"✅ 可验证推理: 已集成")
+        
+        print("\n" + "="*80)
+        print("🎉 演示完成！系统已成功升级为上下文Bandit + 可验证推理")
+        print("="*80)
+        
+        return {
+            'demo_query': demo_query,
+            'context_features': context_features.to_dict(),
+            'bandit_stats': bandit_stats,
+            'reasoning_report': reasoning_report,
+            'system_status': system_status,
+            'configuration': config
+        }
     
     def _create_tool_arm_if_missing(self, tool_id: str, tool_name: str = None) -> EnhancedDecisionArm:
         """
@@ -279,8 +1410,9 @@ class MABConverger:
         # 激活探索增强
         self.trial_ground["exploration_boost_active"][strategy_id] = self.trial_config["exploration_boost_rounds"]
         
-        logger.debug(f"🌱 路径已标记为学习路径: {strategy_id}")
-        logger.debug(f"   探索增强轮数: {self.trial_config['exploration_boost_rounds']}")
+        logger.info(f"🎭 [试炼场] 路径已标记为学习路径: {strategy_id}")
+        logger.info(f"🎭 [试炼场] 探索增强轮数: {self.trial_config['exploration_boost_rounds']}")
+        logger.info(f"🎭 [试炼场] 当前试炼场活跃路径数: {len(self.trial_ground['exploration_boost_active'])}")
     
     def _record_trial_entry(self, strategy_id: str, path_type: str, source: str):
         """
@@ -306,7 +1438,8 @@ class MABConverger:
         if len(self.trial_ground["trial_history"]) > 1000:
             self.trial_ground["trial_history"] = self.trial_ground["trial_history"][-800:]
         
-        logger.debug(f"🎭 试炼场记录: {strategy_id} 开始试炼 ({source})")
+        logger.info(f"🎭 [试炼场] {strategy_id} 开始试炼 (来源: {source})")
+        logger.info(f"🎭 [试炼场] 试炼历史记录数: {len(self.trial_ground['trial_history'])}")
     
     def is_learned_path(self, strategy_id: str) -> bool:
         """
@@ -358,12 +1491,13 @@ class MABConverger:
             remaining = self.trial_ground["exploration_boost_active"][strategy_id]
             if remaining > 0:
                 self.trial_ground["exploration_boost_active"][strategy_id] = remaining - 1
+                logger.info(f"🎭 [试炼场] 路径 {strategy_id} 探索增强剩余: {remaining - 1} 轮")
                 
                 if remaining == 1:  # 即将用完
-                    logger.info(f"🎯 路径 {strategy_id} 的探索增强即将结束")
-                elif remaining <= 0:
+                    logger.info(f"🎯 [试炼场] 路径 {strategy_id} 的探索增强即将结束")
+                elif remaining - 1 <= 0:
                     del self.trial_ground["exploration_boost_active"][strategy_id]
-                    logger.info(f"✅ 路径 {strategy_id} 完成探索增强期，进入正常竞争")
+                    logger.info(f"✅ [试炼场] 路径 {strategy_id} 完成探索增强期，进入正常竞争")
     
     def _check_culling_candidates(self, strategy_id: str, arm: EnhancedDecisionArm, success: bool):
         """
@@ -2064,6 +3198,18 @@ class MABConverger:
             # 🎭 试炼场管理：检查淘汰候选
             self._check_culling_candidates(path_id, target_arm, success)
     
+    def update_path_feedback(self, path_id: str, success: bool, reward: float = 0.0, source: str = "user_feedback"):
+        """
+        🔥 修复：添加update_path_feedback方法（与update_path_performance功能相同，提供兼容性）
+        
+        Args:
+            path_id: 路径ID或工具ID
+            success: 执行是否成功
+            reward: RL奖励值
+            source: 反馈来源
+        """
+        return self.update_path_performance(path_id, success, reward, source)
+    
     def _adjust_reward_by_source(self, reward: float, source: str, success: bool) -> float:
         """
         根据反馈来源调整奖励值
@@ -2663,7 +3809,7 @@ class MABConverger:
     
     def _promote_to_golden_template(self, strategy_id: str, arm: EnhancedDecisionArm):
         """
-        将策略提升为黄金模板 - 🎯 修复版：基于策略ID
+        将策略提升为黄金模板 - 修复版：基于策略ID
         
         Args:
             strategy_id: 策略ID（而非实例ID）
@@ -2674,7 +3820,7 @@ class MABConverger:
             # 移除表现最差的模板
             self._remove_worst_golden_template()
         
-        # 🎯 修复：基于策略ID创建黄金模板
+        # 修复：基于策略ID创建黄金模板
         template_data = {
             'strategy_id': strategy_id,        # 策略ID（用于匹配）
             'path_id': strategy_id,           # 兼容性字段
@@ -2693,18 +3839,18 @@ class MABConverger:
         # 使用策略ID作为模板键
         self.golden_templates[strategy_id] = template_data
         
-        logger.info(f"🏆 新黄金模板诞生！")
-        logger.info(f"   策略ID: {strategy_id}")
-        logger.info(f"   路径类型: {arm.option}")
-        logger.info(f"   成功率: {arm.success_rate:.1%}")
-        logger.info(f"   激活次数: {arm.activation_count}")
+        logger.info(f"新黄金模板诞生！")
+        logger.info(f"策略ID: {strategy_id}")
+        logger.info(f"路径类型: {arm.option}")
+        logger.info(f"成功率: {arm.success_rate:.1%}")
+        logger.info(f"激活次数: {arm.activation_count}")
         avg_rl_reward = sum(arm.rl_reward_history) / len(arm.rl_reward_history) if arm.rl_reward_history else 0.0
-        logger.info(f"   平均奖励: {avg_rl_reward:.3f}")
-        logger.info(f"   当前黄金模板总数: {len(self.golden_templates)}")
+        logger.info(f"平均奖励: {avg_rl_reward:.3f}")
+        logger.info(f"当前黄金模板总数: {len(self.golden_templates)}")
     
     def _update_golden_template(self, strategy_id: str, arm: EnhancedDecisionArm):
         """
-        更新已有的黄金模板数据 - 🎯 修复版：基于策略ID
+        更新已有的黄金模板数据 - 修复版：基于策略ID
         
         Args:
             strategy_id: 策略ID（而非实例ID）
@@ -2720,7 +3866,7 @@ class MABConverger:
                 'stability_score': self._calculate_stability_score(arm)
             })
             
-            logger.debug(f"🏆 更新黄金模板: {strategy_id} -> 成功率:{arm.success_rate:.1%}")
+            logger.debug(f"更新黄金模板: {strategy_id} -> 成功率:{arm.success_rate:.1%}")
     
     def _calculate_stability_score(self, arm: EnhancedDecisionArm) -> float:
         """
@@ -2772,9 +3918,9 @@ class MABConverger:
         
         removed_template = self.golden_templates.pop(worst_template_id)
         
-        logger.info(f"🗑️ 移除表现较差的黄金模板: {worst_template_id}")
-        logger.info(f"   原因: 为新模板腾出空间")
-        logger.info(f"   被移除模板成功率: {removed_template['success_rate']:.1%}")
+        logger.info(f"移除表现较差的黄金模板: {worst_template_id}")
+        logger.info(f"原因: 为新模板腾出空间")
+        logger.info(f"被移除模板成功率: {removed_template['success_rate']:.1%}")
     
     def _calculate_template_quality_score(self, template_data: Dict[str, any]) -> float:
         """
@@ -2818,7 +3964,7 @@ class MABConverger:
         else:
             return 0.0
     
-    # ==================== 🏆 黄金模板管理接口 ====================
+    # ==================== 黄金模板管理接口 ====================
     
     def get_golden_templates(self) -> Dict[str, Dict[str, any]]:
         """
@@ -2881,7 +4027,7 @@ class MABConverger:
             logger.info(f"   模板类型: {removed_template['path_type']}")
             return True
         else:
-            logger.warning(f"⚠️ 黄金模板 {template_id} 不存在")
+            logger.warning(f"黄金模板 {template_id} 不存在")
             return False
     
     def clear_golden_templates(self):
@@ -2893,7 +4039,7 @@ class MABConverger:
         self.template_usage_stats.clear()
         self.template_match_history.clear()
         
-        logger.info(f"🗑️ 已清空所有黄金模板 (共 {count} 个)")
+        logger.info(f"已清空所有黄金模板 (共 {count} 个)")
     
     def export_golden_templates(self) -> str:
         """
@@ -2954,7 +4100,7 @@ class MABConverger:
             logger.error(f"❌ 导入黄金模板失败: {e}")
             return False
     
-    # ==================== 🏆 黄金模板使用示例 ====================
+    # ==================== 黄金模板使用示例 ====================
     
     def demo_golden_template_workflow(self):
         """
@@ -2962,7 +4108,7 @@ class MABConverger:
         
         这是一个示例方法，展示了黄金模板系统的核心功能
         """
-        logger.info("🏆 开始黄金模板系统演示")
+        logger.info("开始黄金模板系统演示")
         
         # 1. 显示当前状态
         stats = self.get_golden_template_stats()
@@ -2977,13 +4123,13 @@ class MABConverger:
         
         # 3. 显示现有黄金模板
         if self.golden_templates:
-            logger.info("🏆 现有黄金模板:")
+            logger.info("现有黄金模板:")
             for template_id, template_data in self.golden_templates.items():
                 logger.info(f"  - {template_id}: {template_data['path_type']} "
                            f"(成功率: {template_data['success_rate']:.1%}, "
                            f"使用次数: {self.template_usage_stats.get(template_id, 0)})")
         else:
-            logger.info("📝 暂无黄金模板")
+            logger.info("暂无黄金模板")
         
         # 4. 显示候选路径
         candidate_paths = []
@@ -2992,7 +4138,7 @@ class MABConverger:
                 candidate_paths.append((path_id, arm))
         
         if candidate_paths:
-            logger.info("⭐ 符合黄金模板条件的候选路径:")
+            logger.info("符合黄金模板条件的候选路径:")
             for path_id, arm in candidate_paths:
                 stability = self._calculate_stability_score(arm)
                 logger.info(f"  - {path_id}: {arm.option} "
@@ -3000,11 +4146,11 @@ class MABConverger:
                            f"样本: {arm.activation_count}, "
                            f"稳定性: {stability:.2f})")
         else:
-            logger.info("📝 暂无符合条件的候选路径")
+            logger.info("暂无符合条件的候选路径")
         
-        logger.info("🏆 黄金模板系统演示完成")
+        logger.info("黄金模板系统演示完成")
     
-    # ==================== 💡 Aha-Moment决策支持系统 ====================
+    # ==================== Aha-Moment决策支持系统 ====================
     
     def get_path_confidence(self, strategy_id: str) -> float:
         """
@@ -3211,7 +4357,7 @@ class MABConverger:
         
         return consecutive_count
     
-    # ==================== 🎯 根源修复完成：移除复杂解析逻辑 ====================
+    # ==================== 根源修复完成：移除复杂解析逻辑 ====================
     # 注意：_resolve_strategy_id 方法已移除，因为数据源头现在直接提供正确的策略ID
     
     def _infer_path_type_from_strategy_id(self, strategy_id: str) -> str:
@@ -3254,7 +4400,7 @@ class MABConverger:
         strategy_lower = strategy_id.lower()
         for key, value in strategy_to_type_mapping.items():
             if key.lower() in strategy_lower or strategy_lower in key.lower():
-                logger.debug(f"🔍 模糊匹配策略类型: {strategy_id} -> {value}")
+                logger.debug(f"模糊匹配策略类型: {strategy_id} -> {value}")
                 return value
         
         # 基于关键词推断
@@ -3276,5 +4422,23 @@ class MABConverger:
             return '适应灵活型'
         
         # 默认返回
-        logger.debug(f"⚠️ 无法推断路径类型，使用默认: {strategy_id} -> 通用方法型")
+        logger.debug(f"无法推断路径类型，使用默认: {strategy_id} -> 通用方法型")
         return '通用方法型'
+
+
+# 向后兼容性：保持原有的MABConverger类名
+MABConverger = ContextualMABConverger
+
+# 为了完全向后兼容，我们也可以创建一个简单的工厂函数
+def create_mab_converger(algorithm: str = "linucb", **kwargs) -> ContextualMABConverger:
+    """
+    创建MAB收敛器的工厂函数
+    
+    Args:
+        algorithm: 使用的算法
+        **kwargs: 其他参数
+        
+    Returns:
+        ContextualMABConverger实例
+    """
+    return ContextualMABConverger(algorithm=algorithm, **kwargs)
