@@ -145,13 +145,14 @@ __all__ = [
 ]
 
 
-def create_system(api_key: str = None, config: dict = None):
+def create_system(api_key: str = None, config: dict = None, workflow_agent=None):
     """
     创建Neogenesis智能决策系统实例
     
     Args:
         api_key: DeepSeek API密钥（可选，用于完整功能）
         config: 系统配置字典
+        workflow_agent: WorkflowGenerationAgent实例（可选，用于战术规划）
         
     Returns:
         NeogenesisPlanner实例
@@ -170,19 +171,15 @@ def create_system(api_key: str = None, config: dict = None):
     # 创建组件
     prior_reasoner = PriorReasoner(api_key or "")
     
-    # 创建LLM客户端（智能选择最佳可用客户端）
+    # 创建DeepSeek客户端（跳过LLM管理器，直接使用DeepSeek）
     llm_client = None
+    # 强制使用硬编码的DeepSeek API密钥
+    api_key = api_key or os.getenv('DEEPSEEK_API_KEY', '')
     if api_key:
         try:
-            # 优先尝试使用LLM管理器来自动选择最佳客户端
-            from .providers.llm_manager import LLMManager
-            llm_manager = LLMManager()
-            if llm_manager.initialized and llm_manager.providers:
-                llm_client = llm_manager
-            else:
-                # 回退到DeepSeek客户端
-                from .providers.impl.deepseek_client import create_llm_client
-                llm_client = create_llm_client(api_key)
+            # 直接使用DeepSeek客户端，不再使用LLM管理器
+            from .providers.impl.deepseek_client import create_llm_client
+            llm_client = create_llm_client(api_key)
         except Exception as e:
             # 静默失败，不在create_system函数中打印错误
             pass
@@ -193,7 +190,8 @@ def create_system(api_key: str = None, config: dict = None):
     return NeogenesisPlanner(
         prior_reasoner=prior_reasoner,
         path_generator=path_generator,
-        mab_converger=mab_converger
+        mab_converger=mab_converger,
+        workflow_agent=workflow_agent
     )
 
 
