@@ -8,9 +8,9 @@ Configuration file - stores all system configurations
 
 # ==================== 传统DeepSeek API配置（向后兼容） ====================
 # 注意：这些常量保留用于向后兼容，新代码应使用LLM_PROVIDERS_CONFIG
-DEEPSEEK_API_BASE = "https://api.deepseek.com"
+DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
 DEEPSEEK_MODEL = "deepseek-chat"
-DEEPSEEK_CHAT_ENDPOINT = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_CHAT_ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
 
 # API调用配置 - 针对并发调用优化
 API_CONFIG = {
@@ -295,7 +295,10 @@ RAG_CONFIG = {
     "enable_intelligent_caching": True,         # 启用智能缓存
     "enable_multi_source_verification": True,   # 启用多源验证
     "enable_contextual_relevance_scoring": True, # 启用上下文相关性评分
-    "search_engines": ["duckduckgo"],           # 支持的搜索引擎
+    "search_engines": ["tavily", "firecrawl"],           # 支持的搜索引擎
+    "default_search_engine": "tavily",        # 默认搜索引擎
+    "tavily_api_key": "",   # Tavily API密钥（请从环境变量TAVILY_API_KEY设置）
+    "firecrawl_api_key": "",   # Firecrawl API密钥（请从环境变量FIRECRAWL_API_KEY设置）
     "max_search_queries_per_request": 2,        # 🚨 减少搜索查询数 - 降低请求压力
     "information_diversity_weight": 0.3,        # 信息多样性权重
     "source_reliability_weight": 0.4,           # 来源可靠性权重
@@ -305,12 +308,12 @@ RAG_CONFIG = {
     "max_search_workers": 3,                    # 最大并行搜索工作线程数
     "parallel_search_timeout": 45,              # 并行搜索总超时时间(秒)
     "enable_search_result_streaming": False,    # 启用搜索结果流式返回
-    "enable_real_web_search": False,            # 🚨 暂时禁用真实搜索 - 避免网络连接问题
+    "enable_real_web_search": True,             # ✅ 启用真实Firecrawl搜索
     # 🛡️ 搜索稳定性优化配置
     "search_rate_limit_interval": 3.0,          # 🚨 增加搜索请求间隔（秒） - 降低触发速率限制风险
     "search_max_retries": 2,                     # 🚨 减少重试次数 - 避免过度请求
     "search_retry_base_delay": 2.0,              # 🚨 增加重试基础延迟（秒）
-    "search_use_fallback_on_ratelimit": True     # 遇到速率限制时自动降级到模拟搜索
+    "search_use_fallback_on_ratelimit": False    # 遇到速率限制时的处理策略（已移除模拟搜索）
 }
 
 # 特性开关
@@ -338,9 +341,10 @@ LLM_PROVIDERS_CONFIG = {
         "display_name": "DeepSeek",
         "provider_type": "deepseek",
         "api_key_env": "DEEPSEEK_API_KEY",
+        "hardcoded_api_key": "",  # DeepSeek API密钥（请从环境变量DEEPSEEK_API_KEY设置）
         "default_model": "deepseek-chat",
-        "available_models": ["deepseek-chat", "deepseek-coder"],
-        "base_url": "https://api.deepseek.com",
+        "available_models": ["deepseek-v3", "deepseek-chat", "deepseek-coder"],
+        "base_url": "https://api.deepseek.com/v1",
         "max_tokens": 4000,
         "temperature": 0.7,
         "timeout": (30, 180),
@@ -354,15 +358,17 @@ LLM_PROVIDERS_CONFIG = {
     },
     
     "openai": {
-        "display_name": "OpenAI GPT",
+        "display_name": "OpenAI GPT (via DeepSeek)",
         "provider_type": "openai", 
         "api_key_env": "OPENAI_API_KEY",
-        "default_model": "gpt-3.5-turbo",
+        "hardcoded_api_key": "",  # 不再使用硬编码密钥，改用环境变量
+        "default_model": "deepseek-v3",  # 修改为使用deepseek-v3
         "available_models": [
+            "deepseek-v3", "gemini-2.5-flash", "gemini-2.5-pro",
             "gpt-3.5-turbo", "gpt-3.5-turbo-16k",
             "gpt-4", "gpt-4-turbo-preview", "gpt-4o", "gpt-4o-mini"
         ],
-        "base_url": None,  # 使用默认
+        "base_url": "https://api.deepseek.com/v1",  # 修改为DeepSeek官方API地址
         "max_tokens": 4000,
         "temperature": 0.7,
         "timeout": (30, 120),
@@ -372,7 +378,7 @@ LLM_PROVIDERS_CONFIG = {
         "features": ["chat", "function_calling", "vision", "json_mode"],
         "cost_per_1k_tokens": {"input": 0.0015, "output": 0.002},
         "context_window": 16384,
-        "enabled": False  # 默认禁用，需要API密钥
+        "enabled": False  # 禁用OpenAI配置，改用DeepSeek
     },
     
     "anthropic": {
