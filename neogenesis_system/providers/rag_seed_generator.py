@@ -81,7 +81,7 @@ class RAGSeedGenerator:
     - 生成具有丰富上下文的思维种子
     """
     
-    def __init__(self, api_key: str = "", search_engine: str = "duckduckgo", 
+    def __init__(self, api_key: str = "", search_engine: str = "tavily", 
                  web_search_client=None, llm_client=None):
         """
         初始化RAG种子生成器
@@ -152,6 +152,19 @@ class RAGSeedGenerator:
         logger.info("🚀 RAG种子生成器初始化完成")
         logger.info(f"   🔍 搜索引擎: {search_engine}")
         logger.info(f"   🧠 AI分析: {'启用' if self.llm_client else '禁用'}")
+    
+    def clear_cache(self):
+        """
+        清除所有缓存
+        
+        在以下情况下应该调用此方法：
+        - 修复了年份注入问题后
+        - 搜索策略逻辑更新后
+        - 手动刷新缓存时
+        """
+        self.strategy_cache.clear()
+        self.synthesis_cache.clear()
+        logger.info("已清除RAG种子生成器的所有缓存")
     
     def generate_rag_seed(self, user_query: str, execution_context: Optional[Dict] = None) -> str:
         """
@@ -240,6 +253,16 @@ class RAGSeedGenerator:
             logger.debug("📋 使用缓存的LLM搜索策略")
             return self.strategy_cache[cache_key]
         
+        # 🔥 关键修复：自动注入当前时间信息
+        from datetime import datetime
+        now = datetime.now()
+        current_time_info = f"""
+📅 **当前时间信息** (生成搜索关键词时请务必参考):
+- 当前年份: {now.year}年
+- 当前日期: {now.strftime('%Y年%m月%d日')}
+- 星期: {now.strftime('%A')}
+"""
+        
         context_info = ""
         if execution_context:
             context_items = [f"- {k}: {v}" for k, v in execution_context.items()]
@@ -247,6 +270,7 @@ class RAGSeedGenerator:
         
         planning_prompt = f"""
 作为一个专业的信息检索策略师，请为以下用户问题制定精准的搜索策略。
+{current_time_info}
 
 🎯 **用户问题**: {user_query}
 {context_info}
@@ -254,22 +278,24 @@ class RAGSeedGenerator:
 📝 **任务要求**:
 1. 深度理解用户问题的核心意图和信息需求
 2. 识别关键概念、实体和技术术语
-3. 确定最佳搜索领域和信息类型
-4. 生成多层次、多角度的搜索关键词组合
-5. 评估搜索深度需求
+3. ⚠️ **重要**：在生成搜索关键词时，必须使用上方提供的当前年份 ({now.year}年)，而不是历史年份
+4. 确定最佳搜索领域和信息类型
+5. 生成多层次、多角度的搜索关键词组合，确保包含正确的时间信息
+6. 评估搜索深度需求
 
 🔍 **输出格式** (严格按照JSON格式):
 ```json
 {{
     "search_intent": "用户搜索的核心意图描述",
     "domain_focus": "主要领域（如：技术、商业、学术、新闻等）",
-    "primary_keywords": ["主要关键词1", "主要关键词2", "主要关键词3"],
+    "primary_keywords": ["主要关键词1（包含{now.year}年）", "主要关键词2", "主要关键词3"],
     "secondary_keywords": ["补充关键词1", "补充关键词2"],
     "information_types": ["需要的信息类型，如：定义、教程、案例、统计数据"],
     "search_depth": "shallow/medium/deep（搜索深度）"
 }}
 ```
 
+⚠️ **特别提醒**: 如果用户问题涉及"最新"、"当前"、"今年"等时间相关的词汇，请在搜索关键词中明确使用 {now.year}年，而不是其他年份。
 请基于问题的复杂性和时效性需求，制定最优的搜索策略。
 """
         
@@ -297,6 +323,10 @@ class RAGSeedGenerator:
     
     def _heuristic_search_planning(self, user_query: str, execution_context: Optional[Dict]) -> RAGSearchStrategy:
         """基于启发式规则的搜索策略生成 - 🚀 智能语义分析版"""
+        
+        # 🔥 关键修复：在启发式方法中也注入当前年份
+        from datetime import datetime
+        current_year = datetime.now().year
         
         if self.semantic_analyzer:
             # 🚀 使用语义分析器进行智能策略生成
@@ -358,7 +388,8 @@ class RAGSeedGenerator:
                     domain_focus = domain_mapping.get(primary_domain, '通用')
                 
                 # 智能关键词提取（基于查询分析而非硬编码列表）
-                primary_keywords = self._extract_semantic_keywords(user_query, analysis_result)
+                # 关键修复：传递当前年份
+                primary_keywords = self._extract_semantic_keywords(user_query, analysis_result, current_year)
                 secondary_keywords = self._generate_secondary_keywords(primary_keywords, domain_focus)
                 
                 logger.debug("🔍 RAG搜索策略语义分析成功")
@@ -374,9 +405,16 @@ class RAGSeedGenerator:
                 
             except Exception as e:
                 logger.warning(f"⚠️ RAG策略语义分析失败: {e}")
-                # 使用默认搜索策略
+                # 使用默认搜索策略，但仍要注入当前年份
+                keywords = user_query.split()[:5]
+                # 🔥 检测时间相关词汇并注入年份
+                time_related_words = ['最新', '当前', '今年', '现在', '最近', 'latest', 'current', 'recent']
+                if any(word in user_query.lower() for word in time_related_words):
+                    keywords.insert(0, f"{current_year}年")
+                    logger.info(f"🕐 回退策略中注入当前年份: {current_year}年")
+                
                 return RAGSearchStrategy(
-                    primary_keywords=user_query.split()[:5],
+                    primary_keywords=keywords,
                     secondary_keywords=[],
                     search_intent="寻找相关信息",
                     domain_focus="通用",
@@ -385,9 +423,16 @@ class RAGSeedGenerator:
                 )
         else:
             logger.debug("📝 语义分析器不可用，使用简化搜索策略")
-            # 简化的搜索策略
+            # 简化的搜索策略，但仍要注入当前年份
+            keywords = user_query.split()[:5]
+            # 🔥 检测时间相关词汇并注入年份
+            time_related_words = ['最新', '当前', '今年', '现在', '最近', 'latest', 'current', 'recent']
+            if any(word in user_query.lower() for word in time_related_words):
+                keywords.insert(0, f"{current_year}年")
+                logger.info(f"🕐 简化策略中注入当前年份: {current_year}年")
+            
             return RAGSearchStrategy(
-                primary_keywords=user_query.split()[:5],
+                primary_keywords=keywords,
                 secondary_keywords=[],
                 search_intent="寻找相关信息",
                 domain_focus="通用", 
@@ -395,9 +440,28 @@ class RAGSeedGenerator:
                 search_depth="medium"
             )
     
-    def _extract_semantic_keywords(self, user_query: str, analysis_result) -> List[str]:
-        """基于语义分析提取关键词"""
+    def _extract_semantic_keywords(self, user_query: str, analysis_result, current_year: int = None) -> List[str]:
+        """
+        基于语义分析提取关键词
+        
+        🔥 增强版：自动检测时间相关查询并注入当前年份
+        """
         keywords = []
+        
+        # 🔥 关键修复：检测时间相关的词汇
+        if current_year is None:
+            from datetime import datetime
+            current_year = datetime.now().year
+        
+        time_related_words = ['最新', '当前', '今年', '现在', '最近', '新', '发展', '趋势', 'latest', 'current', 'recent', 'new', 'trend']
+        query_lower = user_query.lower()
+        has_time_context = any(word in query_lower for word in time_related_words)
+        
+        # 如果查询包含时间相关词汇，在关键词中加入当前年份
+        if has_time_context:
+            keywords.append(f"{current_year}年")
+            keywords.append(str(current_year))
+            logger.info(f"🕐 检测到时间相关查询，已注入当前年份: {current_year}年")
         
         # 基础词汇提取（保留简单有效的方法）
         import re
@@ -470,6 +534,10 @@ class RAGSeedGenerator:
         all_results = []
         search_queries = []
         
+        #终保险措施：获取当前年份
+        from datetime import datetime
+        current_year = datetime.now().year
+        
         # 构建搜索查询
         # 主要关键词组合
         for keyword in strategy.primary_keywords[:3]:  # 限制主要搜索次数
@@ -483,6 +551,9 @@ class RAGSeedGenerator:
         
         # 限制总搜索次数
         search_queries = search_queries[:5]
+        
+        # 🔥 关键修复：最终年份验证和替换
+        search_queries = self._validate_and_fix_year_in_queries(search_queries, current_year)
         
         logger.info(f"🔍 执行 {len(search_queries)} 轮搜索查询")
         
@@ -502,6 +573,70 @@ class RAGSeedGenerator:
         
         logger.info(f"🎯 搜索完成: {len(all_results)} -> {len(unique_results)} (去重后)")
         return unique_results
+    
+    def _validate_and_fix_year_in_queries(self, queries: List[str], current_year: int) -> List[str]:
+        """
+        最终年份验证：检查并替换查询中的错误年份，并为时间相关查询主动添加年份
+        
+        这是最后一道防线，确保所有发送到搜索引擎的查询都使用正确的年份
+        
+        Args:
+            queries: 原始查询列表
+            current_year: 当前正确的年份
+            
+        Returns:
+            修正后的查询列表
+        """
+        import re
+        
+        fixed_queries = []
+        year_pattern = r'20\d{2}年?'  # 匹配2000-2099年的年份
+        
+        # 时间相关关键词 - 需要注入年份
+        time_related_keywords = [
+            '最新', '当前', '今年', '现在', '最近', '新', '发展', '趋势', '动态', '进展',
+            'latest', 'current', 'recent', 'new', 'trend', 'update', 'progress', 'development'
+        ]
+        
+        for query in queries:
+            original_query = query
+            modified = False
+            
+            # 1. 替换错误的年份
+            years_found = re.findall(year_pattern, query)
+            if years_found:
+                for year_str in years_found:
+                    year_num = int(re.sub(r'[^\d]', '', year_str))
+                    if year_num != current_year:
+                        logger.warning(f"⚠️ 检测到错误年份: {year_str} (应为 {current_year}年)")
+                        query = query.replace(year_str, f"{current_year}年")
+                        modified = True
+            
+            # 2. 🔥 关键增强：为时间相关查询主动添加年份（如果尚未包含）
+            query_lower = query.lower()
+            has_time_context = any(keyword in query_lower for keyword in time_related_keywords)
+            has_year = bool(re.search(year_pattern, query))
+            
+            if has_time_context and not has_year:
+                # 查询包含时间相关词汇但没有年份，主动添加
+                logger.warning(f"⚠️ 检测到时间相关查询但缺少年份: {query}")
+                # 智能插入年份：在第一个时间相关词汇后添加
+                for keyword in time_related_keywords:
+                    if keyword in query_lower:
+                        # 找到关键词位置并插入年份
+                        idx = query_lower.index(keyword)
+                        insert_pos = idx + len(keyword)
+                        query = query[:insert_pos] + f" {current_year}年" + query[insert_pos:]
+                        modified = True
+                        break
+            
+            if modified:
+                logger.info(f"🔧 已修正查询: {original_query} -> {query}")
+            
+            fixed_queries.append(query)
+            logger.debug(f"   ✓ 最终查询: {query}")
+        
+        return fixed_queries
     
     def _execute_parallel_search(self, search_queries: List[str], max_workers: int) -> List[SearchResult]:
         """
@@ -673,6 +808,17 @@ class RAGSeedGenerator:
                             execution_context: Optional[Dict]) -> RAGInformationSynthesis:
         """使用LLM进行高级信息综合"""
         
+        # 🔥 关键修复：注入当前时间信息
+        from datetime import datetime
+        now = datetime.now()
+        current_year = now.year
+        current_time_info = f"""
+📅 **关键时间信息** (综合分析时必须参考):
+- 当前年份: {current_year}年
+- 当前日期: {now.strftime('%Y年%m月%d日')}
+- ⚠️ **重要**: 请注意你的训练数据可能截止于2024年，但现在是{current_year}年。在分析搜索结果时，请以{current_year}年为准，而不是你的训练数据。
+"""
+        
         # 构建搜索结果摘要
         results_summary = []
         for i, result in enumerate(search_results[:6], 1):  # 限制结果数量避免token超限
@@ -689,28 +835,33 @@ class RAGSeedGenerator:
         
         synthesis_prompt = f"""
 作为一个专业的信息分析师，请基于用户问题和搜索到的实时信息，生成一个全面、客观、基于事实的思维种子。
+{current_time_info}
 
 🎯 **用户问题**: {user_query}
 
 🔍 **搜索策略**: {strategy.search_intent}
 **关注领域**: {strategy.domain_focus}
 
-📚 **搜索结果**:
+📚 **搜索结果** (这些是{current_year}年的最新实时信息):
 {"".join(results_summary)}
 {context_info}
 
 📝 **综合要求**:
-1. **上下文感知**: 充分理解用户问题的背景和意图
-2. **事实基础**: 基于搜索结果的真实信息，避免猜测
-3. **信息整合**: 将多个来源的信息进行有机整合
-4. **关键洞察**: 提取最重要的观点和发现
-5. **知识缺口**: 识别信息不足或需要进一步验证的领域
-6. **实用导向**: 生成对后续决策有帮助的思考方向
+1. **时间意识**: 明确当前是{current_year}年，搜索结果反映的是{current_year}年的最新情况
+2. **优先使用搜索结果**: 搜索结果是{current_year}年的实时信息，比你的训练数据（可能截止2024年）更新，请优先基于搜索结果回答
+3. **上下文感知**: 充分理解用户问题的背景和意图
+4. **事实基础**: 严格基于搜索结果的真实信息，避免使用过时的训练数据
+5. **信息整合**: 将多个来源的信息进行有机整合
+6. **关键洞察**: 提取最重要的观点和发现
+7. **知识缺口**: 识别信息不足或需要进一步验证的领域
+8. **实用导向**: 生成对后续决策有帮助的思考方向
+
+⚠️ **特别提醒**: 如果搜索结果中提到的时间是{current_year}年，请在思维种子中也使用{current_year}年，而不是默认使用2024年或其他过去的年份。
 
 🎯 **输出格式** (严格按照JSON格式):
 ```json
 {{
-    "contextual_seed": "基于实时信息的全面思维种子（200-400字）",
+    "contextual_seed": "基于{current_year}年实时信息的全面思维种子（200-400字）",
     "key_insights": ["关键洞察1", "关键洞察2", "关键洞察3"],
     "knowledge_gaps": ["需要进一步了解的方面1", "需要进一步了解的方面2"],
     "confidence_score": 0.85,
