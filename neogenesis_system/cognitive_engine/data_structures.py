@@ -425,6 +425,59 @@ class ReasoningPath:
             })
         
         return base_summary
+    
+    def get(self, key: str, default=None):
+        """
+        🔧 向后兼容性方法：提供类似字典的 get 方法
+        
+        这个方法允许代码以字典方式访问 ReasoningPath 对象的属性，
+        避免 'ReasoningPath' object has no attribute 'get' 错误
+        
+        Args:
+            key: 属性名
+            default: 默认值
+            
+        Returns:
+            属性值或默认值
+        """
+        return getattr(self, key, default)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        🔧 转换为字典格式，便于序列化和兼容性处理
+        
+        Returns:
+            包含所有属性的字典
+        """
+        return {
+            "path_id": self.path_id,
+            "path_type": self.path_type,
+            "description": self.description,
+            "prompt_template": self.prompt_template,
+            "strategy_id": self.strategy_id,
+            "instance_id": self.instance_id,
+            "name": self.name,
+            "steps": self.steps,
+            "keywords": self.keywords,
+            "complexity_level": self.complexity_level,
+            "estimated_steps": self.estimated_steps,
+            "success_indicators": self.success_indicators,
+            "failure_patterns": self.failure_patterns,
+            "usage_count": self.usage_count,
+            "success_rate": self.success_rate,
+            "avg_execution_time": self.avg_execution_time,
+            "last_used": self.last_used,
+            "context_tags": list(self.context_tags),
+            "applicable_domains": self.applicable_domains,
+            "prerequisites": self.prerequisites,
+            "related_paths": self.related_paths,
+            "learning_source": self.learning_source,
+            "confidence_score": self.confidence_score,
+            "validation_status": self.validation_status,
+            "evolution_generation": self.evolution_generation,
+            "parent_path_id": self.parent_path_id,
+            "metadata": self.metadata
+        }
 
 
 @dataclass 
