@@ -23,18 +23,40 @@ from enum import Enum
 
 logger = logging.getLogger(__name__)
 
-# LLM 相关导入
+# LLM 相关导入 - 支持多种导入方式
 try:
-    from providers.llm_manager import LLMManager
-    from providers.impl.ollama_client import create_ollama_client, OllamaClient
-    from providers.llm_base import LLMConfig, LLMProvider, LLMMessage
+    # 尝试相对导入
+    from ..providers.llm_manager import LLMManager
+    from ..providers.impl.ollama_client import create_ollama_client, OllamaClient
+    from ..providers.llm_base import LLMConfig, LLMProvider, LLMMessage
     LLM_AVAILABLE = True
-except ImportError as e:
-    logger.warning(f"LLM组件导入失败，将使用纯启发式模式: {e}")
-    LLM_AVAILABLE = False
-    # 定义空的类型提示
-    LLMManager = None
-    OllamaClient = None
+except ImportError as e1:
+    try:
+        # 尝试绝对导入
+        from neogenesis_system.providers.llm_manager import LLMManager
+        from neogenesis_system.providers.impl.ollama_client import create_ollama_client, OllamaClient
+        from neogenesis_system.providers.llm_base import LLMConfig, LLMProvider, LLMMessage
+        LLM_AVAILABLE = True
+    except ImportError as e2:
+        try:
+            # 尝试直接导入（适用于直接运行的情况）
+            import sys
+            import os
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            parent_dir = os.path.dirname(current_dir)
+            if parent_dir not in sys.path:
+                sys.path.insert(0, parent_dir)
+            
+            from providers.llm_manager import LLMManager
+            from providers.impl.ollama_client import create_ollama_client, OllamaClient
+            from providers.llm_base import LLMConfig, LLMProvider, LLMMessage
+            LLM_AVAILABLE = True
+        except ImportError as e3:
+            logger.debug(f"LLM组件导入失败，将使用纯启发式模式: 相对导入({e1}), 绝对导入({e2}), 直接导入({e3})")
+            LLM_AVAILABLE = False
+            # 定义空的类型提示
+            LLMManager = None
+            OllamaClient = None
 
 
 # ==================== 路由分类数据结构定义 ====================
@@ -179,7 +201,14 @@ class PriorReasoner:
             import os
             gemini_api_key = os.getenv("GEMINI_API_KEY", "")
             if gemini_api_key:
-                from ..providers.impl.gemini_client import create_gemini_client
+                try:
+                    from ..providers.impl.gemini_client import create_gemini_client
+                except ImportError:
+                    try:
+                        from neogenesis_system.providers.impl.gemini_client import create_gemini_client
+                    except ImportError:
+                        logger.debug("无法导入gemini客户端，跳过Gemini初始化")
+                        return None
                 gemini_client = create_gemini_client(
                     api_key=gemini_api_key,
                     model="gemini-2.5-flash",
@@ -199,7 +228,18 @@ class PriorReasoner:
                             messages.append({"role": "system", "content": system_message})
                         messages.append({"role": "user", "content": prompt})
                         
-                        from ..providers.llm_base import LLMMessage
+                        try:
+                            from ..providers.llm_base import LLMMessage
+                        except ImportError:
+                            try:
+                                from neogenesis_system.providers.llm_base import LLMMessage
+                            except ImportError:
+                                # 定义基本的消息类
+                                class LLMMessage:
+                                    def __init__(self, role, content):
+                                        self.role = role
+                                        self.content = content
+                        
                         llm_messages = [LLMMessage(role=msg["role"], content=msg["content"]) for msg in messages]
                         response = self.client.chat_completion(llm_messages, **kwargs)
                         
@@ -865,19 +905,20 @@ class PriorReasoner:
         Returns:
             TriageClassification: 完整的智能分类结果
         """
-        logger.info(f"🚀 启动智能路由分析: {user_query[:50]}...")
+        # 注意：这个日志被简化，详细流程日志由Agent配置控制
+        # logger.info(f"🚀 启动智能路由分析: {user_query[:50]}...")
         
         # 第一优先级：LLM 核心路由分析
         llm_result = self._llm_route_analysis(user_query, execution_context)
         if llm_result:
-            logger.info(f"✅ LLM 路由成功: {llm_result.domain.value} -> {llm_result.route_strategy.value} (置信度: {llm_result.confidence:.2f})")
+            # logger.info(f"✅ LLM 路由成功: {llm_result.domain.value} -> {llm_result.route_strategy.value} (置信度: {llm_result.confidence:.2f})")
             return llm_result
         
         # 第二优先级：关键词回退分析
-        logger.info("🔧 LLM 分析不可用，启动关键词回退分析")
+        # logger.info("🔧 LLM 分析不可用，启动关键词回退分析")
         fallback_result = self._fallback_keyword_analysis(user_query, execution_context)
         
-        logger.info(f"📊 回退分析完成: {fallback_result.domain.value} -> {fallback_result.route_strategy.value} (置信度: {fallback_result.confidence:.2f})")
+        # logger.info(f"📊 回退分析完成: {fallback_result.domain.value} -> {fallback_result.route_strategy.value} (置信度: {fallback_result.confidence:.2f})")
         return fallback_result
 
 
@@ -1026,6 +1067,70 @@ class PriorReasoner:
                 
                 logger.info("🔧 使用默认通用种子")
                 return default_seed
+    
+    def generate_thinking_seed(self, user_query: str, execution_context: Optional[Dict] = None) -> Dict[str, Any]:
+        """
+        生成思维种子 - NeogenesisPlanner兼容接口
+        
+        这个方法是为了兼容NeogenesisPlanner中的调用，将get_thinking_seed的结果
+        包装成期望的字典格式。
+        
+        Args:
+            user_query: 用户查询
+            execution_context: 执行上下文
+            
+        Returns:
+            Dict: 包含thinking_seed、reasoning、confidence的字典
+        """
+        try:
+            logger.info(f"🧠 生成思维种子 (兼容接口): {user_query[:30]}...")
+            
+            # 调用核心的get_thinking_seed方法
+            thinking_seed = self.get_thinking_seed(user_query, execution_context)
+            
+            # 获取分析信息
+            analysis = self.get_quick_analysis_summary(user_query, execution_context)
+            confidence = self.assess_task_confidence(user_query, execution_context)
+            
+            # 构建推理过程描述
+            reasoning_parts = [
+                f"任务领域: {analysis.get('domain', '通用')}",
+                f"复杂度评分: {analysis.get('complexity_score', 0.5):.2f}",
+                f"置信度评分: {confidence:.2f}",
+                f"推荐策略: {analysis.get('recommendation', '系统性分析')}"
+            ]
+            
+            if analysis.get('key_factors'):
+                factors_text = "、".join(analysis['key_factors'][:3])
+                reasoning_parts.append(f"关键因素: {factors_text}")
+            
+            reasoning_process = "; ".join(reasoning_parts)
+            
+            # 包装成期望的格式
+            result = {
+                "thinking_seed": thinking_seed,
+                "reasoning": reasoning_process,
+                "confidence": confidence,
+                "generation_method": "prior_reasoner_enhanced",
+                "domain": analysis.get('domain', '通用'),
+                "complexity_score": analysis.get('complexity_score', 0.5),
+                "user_query": user_query
+            }
+            
+            logger.info(f"✅ 思维种子生成完成: {len(thinking_seed)}字符, 置信度: {confidence:.3f}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ 思维种子生成失败: {e}")
+            # 返回基础结果但保持格式一致
+            fallback_seed = f"针对查询'{user_query}'的基础思维种子：需要系统性分析和解决方案制定。"
+            return {
+                "thinking_seed": fallback_seed,
+                "reasoning": "使用回退生成方法",
+                "confidence": 0.3,
+                "generation_method": "fallback",
+                "error": str(e)
+            }
     
     def analyze_task_complexity(self, user_query: str) -> Dict[str, Any]:
         """
