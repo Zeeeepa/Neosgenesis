@@ -14,14 +14,39 @@ import time
 import logging
 from typing import Any, Dict, List, Optional, Union
 
-# 🔥 导入新的装饰器系统
-from ..tools.tool_abstraction import (
-    tool,           # 🎯 核心装饰器
-    ToolCategory, 
-    ToolResult, 
-    ToolCapability,
-    register_tool   # 保留用于便捷函数
-)
+# 🔥 导入新的装饰器系统 - 支持多种导入方式
+try:
+    from ..tools.tool_abstraction import (
+        tool,           # 🎯 核心装饰器
+        ToolCategory, 
+        ToolResult, 
+        ToolCapability,
+        register_tool   # 保留用于便捷函数
+    )
+except ImportError:
+    try:
+        from neogenesis_system.tools.tool_abstraction import (
+            tool,
+            ToolCategory, 
+            ToolResult, 
+            ToolCapability,
+            register_tool
+        )
+    except ImportError:
+        # 如果都导入失败，定义基本的替代品
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning("工具装饰器系统导入失败，某些功能可能不可用")
+        
+        # 定义最基本的替代品
+        class ToolCategory:
+            SEARCH = "search"
+            SYSTEM = "system"
+        
+        def tool(*args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
 
 # 导入现有搜索客户端
 from .search_client import (
@@ -68,7 +93,7 @@ def web_search(query: str, max_results: int = 5) -> Dict[str, Any]:
     logger.info(f"🔍 执行网络搜索: {query[:50]}...")
     
     # 🎯 核心逻辑：调用搜索客户端
-    search_client = WebSearchClient(search_engine="duckduckgo", max_results=max_results)
+    search_client = WebSearchClient(search_engine="tavily", max_results=max_results)
     search_response = search_client.search(query, max_results)
     
     if not search_response.success:
@@ -87,7 +112,8 @@ def web_search(query: str, max_results: int = 5) -> Dict[str, Any]:
             for result in search_response.results
         ],
         "total_results": search_response.total_results,
-        "search_time": search_response.search_time
+        "search_time": search_response.search_time,
+        "success": search_response.success and bool(search_response.results)  # 只有真正有结果才算成功
     }
     
     logger.info(f"✅ 搜索完成: 找到 {len(search_response.results)} 个结果")
@@ -96,9 +122,14 @@ def web_search(query: str, max_results: int = 5) -> Dict[str, Any]:
 
 @tool(
     category=ToolCategory.SEARCH,
-    rate_limited=True       # 有速率限制
+    name="idea_verification",  # 🔥 修复：使用正确的工具名
+    overwrite=True,           # 🔥 覆盖default_tools中的模拟实现
+    rate_limited=True         # 有速率限制
 )
-def idea_verification(idea_text: str) -> Dict[str, Any]:
+def idea_verification(input: str = None, idea_text: str = None, idea: str = None, 
+                     criteria: List[str] = None, verification_criteria: List[str] = None,
+                     confidence_threshold: float = 0.7, include_counterarguments: bool = False,
+                     context: Optional[Dict] = None) -> Dict[str, Any]:
     """
     验证想法或概念的可行性，提供详细分析和建议。
     
@@ -107,23 +138,71 @@ def idea_verification(idea_text: str) -> Dict[str, Any]:
     适用于创意评估、投资决策、产品规划等场景。
     
     Args:
-        idea_text: 想法描述文本
+        input: 想法描述文本（兼容参数名）
+        idea_text: 想法描述文本（备用参数名）
+        idea: 想法描述文本（主参数名，与neogenesis_planner兼容）
+        criteria: 验证标准列表（兼容参数名）
+        verification_criteria: 验证标准列表（主参数名）
+        confidence_threshold: 置信度阈值（默认0.7）
+        include_counterarguments: 是否包含反驳论点（默认False）
         
     Returns:
         Dict: 验证结果数据
     """
+    # 🔥 调试：打印接收到的参数
+    logger.info(f"🔍 idea_verification工具接收到的参数:")
+    logger.info(f"   idea_text: {idea_text}")
+    logger.info(f"   context: {context}")
+    
     # 🎯 只需要写核心逻辑！所有样板代码都由装饰器自动处理
     
+    # 🔥 参数兼容性处理 - 支持多种参数名
+    text_to_verify = idea or input or idea_text
+    verification_criteria_list = verification_criteria or criteria or ['feasibility', 'accuracy', 'relevance']
+    
     # 基本输入验证
-    if not idea_text or len(idea_text.strip()) < 10:
+    if not text_to_verify or len(text_to_verify.strip()) < 10:
         raise ValueError("想法描述过短或为空")
     
-    logger.info(f"💡 执行想法验证: {idea_text[:50]}...")
+    logger.info(f"💡 执行想法验证: {text_to_verify[:50]}...")
+    logger.info(f"🎯 验证标准: {verification_criteria_list}")
+    logger.info(f"🎯 置信度阈值: {confidence_threshold}")
+    logger.info(f"🎯 包含反驳论点: {include_counterarguments}")
     
-    # 🎯 核心逻辑：调用验证客户端
-    web_search_client = WebSearchClient(search_engine="duckduckgo", max_results=5)
-    verification_client = IdeaVerificationSearchClient(web_search_client)
-    verification_result = verification_client.verify_idea_feasibility(idea_text)
+    # 🎯 核心逻辑：调用验证客户端 - 🚀 集成语义分析器
+    logger.info(f"🔍 [idea_verification] 创建WebSearchClient...")
+    web_search_client = WebSearchClient(search_engine="tavily", max_results=5)
+    logger.info(f"✅ [idea_verification] WebSearchClient创建成功")
+    
+    # 🧠 尝试创建语义分析器
+    semantic_analyzer = None
+    try:
+        logger.info(f"🔍 [idea_verification] 尝试创建语义分析器...")
+        from ..cognitive_engine.semantic_analyzer import create_semantic_analyzer
+        semantic_analyzer = create_semantic_analyzer()
+        logger.info("✅ [idea_verification] 语义分析器创建成功，将用于智能查询构建")
+    except Exception as e:
+        logger.warning(f"⚠️ [idea_verification] 语义分析器创建失败，使用传统方法: {e}")
+    
+    logger.info(f"🔍 [idea_verification] 创建IdeaVerificationSearchClient...")
+    verification_client = IdeaVerificationSearchClient(web_search_client, semantic_analyzer)
+    logger.info(f"✅ [idea_verification] IdeaVerificationSearchClient创建成功")
+    
+    # 构建验证上下文
+    verification_context = {
+        'criteria': verification_criteria_list,
+        'confidence_threshold': confidence_threshold,
+        'include_counterarguments': include_counterarguments
+    }
+    
+    # 🎯 添加用户查询信息到上下文
+    if context:
+        verification_context.update(context)
+    
+    logger.info(f"🔍 [idea_verification] 调用verify_idea_feasibility进行验证...")
+    logger.info(f"🔍 [idea_verification] 验证上下文: {verification_context}")
+    verification_result = verification_client.verify_idea_feasibility(text_to_verify, verification_context)
+    logger.info(f"🔍 [idea_verification] 验证完成，成功: {verification_result.success}")
     
     if not verification_result.success:
         raise RuntimeError(f"想法验证失败: {verification_result.error_message}")
@@ -141,11 +220,58 @@ def idea_verification(idea_text: str) -> Dict[str, Any]:
                 "relevance_score": result.relevance_score
             }
             for result in verification_result.search_results
-        ]
+        ],
+        # 🔥 添加reward_score字段，基于feasibility_score计算
+        "reward_score": _calculate_reward_from_feasibility_score(verification_result.feasibility_score),
+        "feasibility_analysis": {
+            "feasibility_score": verification_result.feasibility_score
+        },
+        # 🔥 新增：验证配置信息
+        "verification_config": {
+            "criteria": verification_criteria_list,
+            "confidence_threshold": confidence_threshold,
+            "include_counterarguments": include_counterarguments,
+            "meets_threshold": verification_result.feasibility_score >= confidence_threshold
+        }
     }
     
-    logger.info(f"✅ 想法验证完成: 可行性评分 {verification_result.feasibility_score:.2f}")
+    logger.info(f"✅ 想法验证完成: 可行性评分 {verification_result.feasibility_score:.2f}, 奖励: {results_data['reward_score']:.3f}")
     return results_data
+
+
+def _calculate_reward_from_feasibility_score(feasibility_score: float) -> float:
+    """
+    基于可行性分数计算奖励值 - 与neogenesis_planner中的逻辑保持一致
+    
+    Args:
+        feasibility_score: 可行性分数 (0.0-1.0)
+        
+    Returns:
+        float: 奖励值 (-1.0 到 1.0)
+    """
+    try:
+        # 将可行性分数转换为奖励值
+        if feasibility_score >= 0.7:
+            # 高可行性：0.2 到 0.8 的正奖励
+            reward = 0.2 + (feasibility_score - 0.7) * 2.0
+        elif feasibility_score >= 0.3:
+            # 中等可行性：0.1 到 0.2 的小正奖励
+            reward = 0.1 + (feasibility_score - 0.3) * 0.25
+        else:
+            # 低可行性：-0.3 到 0.1 的奖励
+            reward = -0.3 + feasibility_score * 1.33
+        
+        # 确保奖励值在合理范围内
+        reward = max(-1.0, min(1.0, reward))
+        
+        # 确保奖励值不为零
+        if reward == 0.0:
+            reward = 0.05 if feasibility_score >= 0.5 else -0.05
+        
+        return reward
+        
+    except Exception:
+        return 0.1  # 默认小正奖励
 
 
 # ============================================================================
