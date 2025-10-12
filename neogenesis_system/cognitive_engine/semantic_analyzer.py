@@ -134,7 +134,7 @@ class SemanticAnalyzer:
             'timeout': 30,     # 请求超时时间
             'batch_size': 5,   # 批处理大小
             'confidence_threshold': 0.7,  # 默认置信度阈值
-            'model_name': 'deepseek-chat',  # 默认模型
+            'model_name': None,  # 默认模型（None表示使用LLM管理器的默认模型）
             'temperature': 0.1,  # 低温度保证结果稳定性
         }
         
@@ -771,12 +771,14 @@ class SemanticAnalyzer:
             ]
             
             # 使用LLM管理器调用
+            # 如果model为None，LLM管理器会自动使用当前提供商的默认模型
+            model_to_use = kwargs.get('model') or self.config.get('model_name')
             response = self.llm_manager.chat_completion(
                 messages=messages,
-                model=kwargs.get('model', self.config['model_name']),
-                temperature=kwargs.get('temperature', self.config['temperature']),
+                model=model_to_use,  # None会让LLM管理器自动选择
+                temperature=kwargs.get('temperature', self.config.get('temperature', 0.1)),
                 max_tokens=kwargs.get('max_tokens', 2000),
-                timeout=kwargs.get('timeout', self.config['timeout'])
+                timeout=kwargs.get('timeout', self.config.get('timeout', 30))
             )
             
             if response and response.success:
