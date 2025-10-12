@@ -11,7 +11,6 @@ Lightweight Analysis Assistant - focused on rapid task assessment and complexity
 2. 任务置信度评估 (基于历史数据和模式)
 3. 领域推断和统计分析 (辅助决策支持)
 
-注意：思维种子生成功能已移交给RAGSeedGenerator专门处理
 """
 
 import time
@@ -207,8 +206,9 @@ class PriorReasoner:
                     try:
                         from neogenesis_system.providers.impl.gemini_client import create_gemini_client
                     except ImportError:
-                        logger.debug("无法导入gemini客户端，跳过Gemini初始化")
-                        return None
+                        logger.debug("⚠️ Gemini客户端模块不存在，跳过Gemini初始化")
+                        raise ImportError("gemini_client module not found")
+                
                 gemini_client = create_gemini_client(
                     api_key=gemini_api_key,
                     model="gemini-2.5-flash",
@@ -295,14 +295,16 @@ class PriorReasoner:
                 logger.warning(f"⚠️ 创建LLM管理器失败: {e}")
                 raise Exception("无法初始化任何LLM能力")
     
-    def _call_llm(self, prompt: str, temperature: float = 0.1, max_tokens: int = 500) -> Optional[str]:
+    def _call_llm(self, prompt: str, temperature: float = 0.1, max_tokens: int = 500,
+                  enable_streaming: bool = False) -> Optional[str]:
         """
-        通用LLM调用接口
+        通用LLM调用接口（支持流式）
         
         Args:
             prompt: 输入提示
             temperature: 温度参数
             max_tokens: 最大token数
+            enable_streaming: 是否启用流式输出
             
         Returns:
             LLM响应内容，失败时返回None
@@ -311,7 +313,25 @@ class PriorReasoner:
             return None
             
         try:
-            # 方式1：优先使用Ollama客户端（更快速）
+            # 方式1：优先使用LLM管理器（支持流式）
+            if self.llm_manager:
+                if enable_streaming and hasattr(self.llm_manager, 'call_api_with_streaming'):
+                    response_content = self.llm_manager.call_api_with_streaming(
+                        prompt=prompt,
+                        temperature=temperature,
+                        enable_streaming=True
+                    )
+                else:
+                    response_content = self.llm_manager.call_api(
+                        prompt=prompt,
+                        temperature=temperature
+                    )
+                
+                if response_content:
+                    logger.debug(f"✅ LLM管理器调用成功: {response_content[:50]}...")
+                    return response_content
+            
+            # 方式2：使用Ollama客户端作为回退
             if self.ollama_client:
                 messages = [LLMMessage(role="user", content=prompt)]
                 response = self.ollama_client.chat_completion(
@@ -326,19 +346,110 @@ class PriorReasoner:
                 else:
                     logger.warning(f"⚠️ Ollama调用失败: {response.error_message}")
                     
-            # 方式2：使用LLM管理器作为回退
-            if self.llm_manager:
-                response_content = self.llm_manager.call_api(
-                    prompt=prompt,
-                    temperature=temperature
-                )
-                
-                if response_content:
-                    logger.debug(f"✅ LLM管理器调用成功: {response_content[:50]}...")
-                    return response_content
-                    
         except Exception as e:
             logger.warning(f"⚠️ LLM调用异常: {e}")
+            
+        return None
+    
+    def _call_llm_streaming(self, prompt: str, temperature: float = 0.7, max_tokens: int = 800) -> Optional[str]:
+        """
+        流式LLM调用 - 实时显示生成过程
+        
+        Args:
+            prompt: 输入提示
+            temperature: 温度参数
+            max_tokens: 最大token数
+            
+        Returns:
+            完整的LLM响应内容，失败时返回None
+        """
+        if not self.enable_llm:
+            return None
+            
+        try:
+            full_response = ""
+            
+            # 方式1：使用LLM管理器的流式API
+            if self.llm_manager and hasattr(self.llm_manager, 'call_api_streaming_generator'):
+                try:
+                    # 使用流式生成器 - 逐token实时输出
+                    print("\n", end="", flush=True)  # 确保在新行开始
+                    for chunk in self.llm_manager.call_api_streaming_generator(
+                        prompt=prompt,
+                        temperature=temperature,
+                        max_tokens=max_tokens
+                    ):
+                        if chunk:
+                            print(chunk, end="", flush=True)
+                            full_response += chunk
+                    
+                    print()  # 换行
+                    logger.debug(f"✅ 流式生成完成，总长度: {len(full_response)}字符")
+                    return full_response
+                    
+                except AttributeError as e:
+                    # 如果没有流式生成器，使用普通模式但逐字打印
+                    logger.warning(f"⚠️ LLM管理器不支持流式生成器: {e}，使用模拟流式输出")
+                    response_content = self.llm_manager.call_api(
+                        prompt=prompt,
+                        temperature=temperature,
+                        max_tokens=max_tokens
+                    )
+                    
+                    if response_content:
+                        # 模拟流式输出
+                        import time
+                        print("\n", end="", flush=True)
+                        for char in response_content:
+                            print(char, end="", flush=True)
+                            time.sleep(0.01)  # 模拟打字效果
+                        print()  # 换行
+                        return response_content
+                except Exception as e:
+                    logger.error(f"❌ 流式生成器调用失败: {e}")
+                    # 继续尝试其他方式
+            
+            # 方式2：使用Ollama客户端（支持真实流式）
+            if self.ollama_client:
+                messages = [LLMMessage(role="user", content=prompt)]
+                
+                # 检查是否支持流式
+                if hasattr(self.ollama_client, 'chat_completion_stream'):
+                    # 真实流式输出
+                    for chunk in self.ollama_client.chat_completion_stream(
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens
+                    ):
+                        if chunk and hasattr(chunk, 'content'):
+                            print(chunk.content, end="", flush=True)
+                            full_response += chunk.content
+                    
+                    print()  # 换行
+                    logger.debug(f"✅ Ollama流式生成完成，总长度: {len(full_response)}字符")
+                    return full_response
+                else:
+                    # 回退到普通模式 + 模拟流式
+                    logger.debug("⚠️ Ollama不支持流式，使用模拟流式输出")
+                    response = self.ollama_client.chat_completion(
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens
+                    )
+                    
+                    if response.success:
+                        import time
+                        for char in response.content:
+                            print(char, end="", flush=True)
+                            time.sleep(0.01)
+                        print()  # 换行
+                        return response.content
+                        
+        except Exception as e:
+            logger.warning(f"⚠️ 流式LLM调用异常: {e}")
+            print(f"\n⚠️ 流式输出失败，切换到普通模式")
+            # 回退到普通调用
+            return self._call_llm(prompt, temperature, max_tokens, enable_streaming=False)
             
         return None
     
@@ -968,109 +1079,285 @@ class PriorReasoner:
         resources.extend(domain_resources.get(domain, []))
         return resources[:4]  # 限制最多4个资源
     
-    def get_thinking_seed(self, user_query: str, execution_context: Optional[Dict] = None) -> str:
+    def get_thinking_seed(self, user_query: str, execution_context: Optional[Dict] = None,
+                         enable_streaming: bool = False) -> str:
         """
-        生成思维种子 - 兼容性适配器方法
+        生成思维种子 - LLM增强版（保留启发式回退）
         
-        注意：此方法现在基于轻量级分析功能重新实现，保持与原有接口的兼容性
+        新策略：
+        1. 使用启发式分析提取关键特征（快速且免费）
+        2. 基于特征构建专业提示词并调用LLM生成高质量种子
+        3. LLM失败时回退到改进的启发式生成
+        4. 最终回退到紧急种子生成
         
         Args:
             user_query: 用户查询
             execution_context: 执行上下文
+            enable_streaming: 是否启用流式输出
             
         Returns:
-            基于快速分析生成的思维种子
+            高质量的思维种子
         """
-        logger.info(f"🔄 使用轻量级分析生成思维种子: {user_query[:30]}...")
+        logger.info(f"🌱 启动LLM增强思维种子生成: {user_query[:30]}...")
         
         try:
-            # 使用新的快速分析功能生成思维种子
+            # ========== 第一步：快速启发式分析（提供结构化输入） ==========
             analysis = self.get_quick_analysis_summary(user_query, execution_context)
-            
-            # 构建结构化的思维种子
-            seed_parts = []
-            
-            # 问题理解部分
-            seed_parts.append(f"这是一个{analysis['domain']}领域的任务。")
-            
-            # 复杂度分析
-            complexity = analysis['complexity_score']
-            if complexity > 0.8:
-                seed_parts.append("任务具有高复杂度，需要系统性和多步骤的解决方案。")
-            elif complexity > 0.5:
-                seed_parts.append("任务复杂度适中，需要结构化的分析方法。")
-            else:
-                seed_parts.append("任务相对简单，可以采用直接的解决方法。")
-            
-            # 置信度考虑
             confidence = analysis['confidence_score']
-            if confidence > 0.8:
-                seed_parts.append("基于问题描述，我们有较高的信心找到有效解决方案。")
-            elif confidence > 0.5:
-                seed_parts.append("问题需要进一步分析以确定最佳方法。")
-            else:
-                seed_parts.append("问题可能需要额外信息或澄清来制定有效方案。")
+            complexity = analysis['complexity_score']
+            domain = analysis['domain']
+            key_factors = analysis.get('key_factors', [])
             
-            # 关键因素
-            if analysis['key_factors']:
-                factors_text = "、".join(analysis['key_factors'][:3])
-                seed_parts.append(f"关键考虑因素包括：{factors_text}。")
+            logger.debug(f"📊 启发式分析完成: {domain}领域, 复杂度{complexity:.2f}, 置信度{confidence:.2f}")
             
-            # 推荐策略
-            seed_parts.append(f"建议采用的策略：{analysis['recommendation']}")
+            # ========== 第二步：尝试LLM增强生成 ==========
+            if self.enable_llm:
+                llm_seed = self._generate_llm_enhanced_seed(
+                    user_query=user_query,
+                    analysis_context={
+                        'domain': domain,
+                        'complexity_score': complexity,
+                        'confidence_score': confidence,
+                        'key_factors': key_factors,
+                        'requires_multi_step': analysis.get('requires_multi_step', False)
+                    },
+                    execution_context=execution_context,
+                    enable_streaming=enable_streaming
+                )
+                
+                if llm_seed:
+                    logger.info(f"✅ LLM增强种子生成成功 (长度: {len(llm_seed)}字符)")
+                    return llm_seed
             
-            # 多步骤检测
-            if analysis['requires_multi_step']:
-                seed_parts.append("这是一个多阶段任务，需要按步骤逐一执行。")
-            
-            # 执行上下文考虑
-            if execution_context:
-                if execution_context.get('real_time_requirements'):
-                    seed_parts.append("需要特别注意实时性要求。")
-                if execution_context.get('performance_critical'):
-                    seed_parts.append("性能优化是关键考虑因素。")
-            
-            thinking_seed = " ".join(seed_parts)
-            
-            logger.info(f"✅ 思维种子生成完成 (长度: {len(thinking_seed)}字符)")
-            logger.debug(f"🌱 种子内容: {thinking_seed[:100]}...")
-            
-            return thinking_seed
+            # ========== 第三步：回退到改进的启发式生成 ==========
+            logger.info("🔧 LLM不可用或失败，使用改进的启发式种子生成")
+            return self._generate_heuristic_seed(user_query, analysis, execution_context)
             
         except Exception as e:
-            logger.error(f"⚠️ 轻量级思维种子生成失败: {e}")
-            
-            # 最终回退：使用基础分析生成简单种子
-            try:
-                complexity_info = self.analyze_task_complexity(user_query)
-                confidence_score = self.assess_task_confidence(user_query, execution_context)
-                
-                fallback_seed = (
-                    f"这是一个关于'{user_query}'的{complexity_info['estimated_domain']}任务。"
-                    f"复杂度评估为{complexity_info['complexity_score']:.2f}，"
-                    f"置信度为{confidence_score:.2f}。"
-                    f"建议采用系统性的方法来分析和解决这个问题。"
-                )
-                
-                logger.info(f"🔧 使用回退种子生成 (长度: {len(fallback_seed)}字符)")
-                return fallback_seed
-                
-            except Exception as fallback_error:
-                logger.error(f"⚠️ 回退种子生成也失败: {fallback_error}")
-                
-                # 绝对最终回退
-                default_seed = (
-                    f"针对'{user_query}'这个任务，需要进行系统性的分析。"
-                    f"建议首先理解问题的核心需求，然后制定分步骤的解决方案，"
-                    f"最后验证方案的可行性和有效性。"
-                )
-                
-                logger.info("🔧 使用默认通用种子")
-                return default_seed
+            logger.error(f"❌ 思维种子生成异常: {e}")
+            # 最终回退
+            return self._generate_emergency_fallback_seed(user_query)
     
-    def generate_thinking_seed(self, user_query: str, execution_context: Optional[Dict] = None) -> Dict[str, Any]:
+    def _generate_llm_enhanced_seed(self, user_query: str, analysis_context: Dict,
+                                    execution_context: Optional[Dict] = None,
+                                    enable_streaming: bool = False) -> Optional[str]:
         """
-        生成思维种子 - NeogenesisPlanner兼容接口
+        LLM增强的思维种子生成（核心新方法）
+        
+        使用高质量提示词调用LLM，结合启发式分析的结构化信息，生成专业的思维种子。
+        
+        Args:
+            user_query: 用户查询
+            analysis_context: 启发式分析提供的上下文（领域、复杂度、置信度等）
+            execution_context: 执行上下文
+            enable_streaming: 是否流式输出
+            
+        Returns:
+            LLM生成的高质量思维种子，失败时返回None
+        """
+        try:
+            # 构建上下文信息
+            context_info = ""
+            if execution_context:
+                context_items = []
+                if execution_context.get('real_time_requirements'):
+                    context_items.append("⚡ 需要关注实时性")
+                if execution_context.get('performance_critical'):
+                    context_items.append("🚀 性能优化是关键")
+                if execution_context.get('domain_specific'):
+                    context_items.append(f"🎯 专业领域: {execution_context.get('domain_specific')}")
+                
+                if context_items:
+                    context_info = "\n\n**执行要求**:\n" + "\n".join(f"- {item}" for item in context_items)
+            
+            # 构建分析背景
+            analysis_background = f"""
+**任务特征分析**（基于快速评估）:
+- 领域识别: {analysis_context['domain']}
+- 复杂度评分: {analysis_context['complexity_score']:.2f} (0-1量级)
+- 置信度评分: {analysis_context['confidence_score']:.2f} (0-1量级)
+- 关键因素: {', '.join(analysis_context['key_factors'][:3]) if analysis_context['key_factors'] else '通用分析'}
+- 多步骤需求: {'是' if analysis_context.get('requires_multi_step') else '否'}
+"""
+            
+            # 🎯 核心提示词：高质量、结构化、专业化、去模板化
+            llm_prompt = f"""你是一位资深的问题分析专家，擅长快速理解问题本质并生成高质量的分析思路。
+
+【用户问题】
+{user_query}
+
+{analysis_background}
+{context_info}
+
+【任务要求】
+请生成一个高质量的"思维种子"（初步分析思路），要求：
+
+1. **深度理解**：
+   - 准确识别问题的核心意图和关键需求（用户真正想解决什么？）
+   - 分析问题所属的技术或知识领域（涉及哪些专业领域？）
+   - 判断问题的复杂度和解决难度（需要什么级别的专业知识？）
+   - 理解问题的应用场景和实际背景（在什么情境下使用？）
+   - 识别隐含的约束条件和前置依赖（有什么限制？需要什么基础？）
+   - 评估问题的时效性和紧急程度（是否需要最新信息？是否紧急？）
+
+2. **思路规划**：
+   - 提出2-3个可能的解决方向或分析角度
+   - 指出需要考虑的关键因素和潜在挑战
+   - 如果是多步骤任务，简要说明主要阶段
+
+3. **输出要求**：
+   - **开头必须**：用一句话简洁复述用户的核心问题（例如："用户询问的是..."或"用户希望了解..."）
+   - 使用自然、专业的语言（不要使用"这是一个...领域的任务"等模板化表达）
+   - 长度控制在150-300字
+   - 重点突出，逻辑清晰
+   - 提供深度分析价值，而不是简单重复问题
+   - 避免过于宽泛的建议，要有针对性
+
+【输出格式】
+直接输出思维种子内容，不需要JSON格式，不需要标题前缀。用2-4个自然段落组织你的分析。
+
+"""
+            
+            # 调用LLM（支持流式）
+            if enable_streaming:
+                # 流式模式：实时显示生成过程
+                logger.debug("🔄 开始流式生成思维种子...")
+                
+                llm_response = self._call_llm_streaming(
+                    prompt=llm_prompt,
+                    temperature=0.7,
+                    max_tokens=800
+                )
+            else:
+                # 非流式模式：一次性返回
+                llm_response = self._call_llm(
+                    prompt=llm_prompt,
+                    temperature=0.7,
+                    max_tokens=800,
+                    enable_streaming=False
+                )
+            
+            if llm_response:
+                # 清理和验证响应
+                cleaned_seed = llm_response.strip()
+                
+                # 基本质量检查
+                if len(cleaned_seed) < 50:
+                    logger.warning(f"⚠️ LLM生成的种子过短({len(cleaned_seed)}字符)，可能质量不佳")
+                    return None
+                
+                if len(cleaned_seed) > 1000:
+                    logger.warning(f"⚠️ LLM生成的种子过长({len(cleaned_seed)}字符)，进行截断")
+                    cleaned_seed = cleaned_seed[:800] + "..."
+                
+                # 验证不是简单的问题复述
+                if user_query in cleaned_seed[:100] and len(user_query) > 20:
+                    logger.debug("⚠️ LLM可能过多复述问题，但仍可接受")
+                
+                logger.debug(f"🤖 LLM种子预览: {cleaned_seed[:100]}...")
+                return cleaned_seed
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"⚠️ LLM增强种子生成失败: {e}")
+            return None
+    
+    def _generate_heuristic_seed(self, user_query: str, analysis: Dict,
+                                 execution_context: Optional[Dict] = None) -> str:
+        """
+        启发式种子生成（改进版 - 更自然的表达）
+        
+        相比旧版的模板化输出，新版使用更自然、更有针对性的语言。
+        
+        Args:
+            user_query: 用户查询
+            analysis: 快速分析结果
+            execution_context: 执行上下文
+            
+        Returns:
+            基于规则但更自然的思维种子
+        """
+        seed_parts = []
+        
+        # 领域识别（更自然的表达）
+        domain = analysis.get('domain', 'general')
+        domain_descriptions = {
+            'web_development': 'Web开发相关',
+            'data_science': '数据科学和分析相关',
+            'api_development': 'API接口开发相关',
+            'database': '数据库设计和操作相关',
+            'system_admin': '系统运维和管理相关',
+            'machine_learning': '机器学习和AI相关',
+            'security': '安全和防护相关',
+            'mobile_development': '移动应用开发相关',
+            'performance': '性能优化相关',
+            'automation': '自动化和脚本相关',
+            'general': '通用技术'
+        }
+        domain_desc = domain_descriptions.get(domain, '技术')
+        seed_parts.append(f"这个问题涉及{domain_desc}的内容。")
+        
+        # 复杂度分析（更有针对性）
+        complexity = analysis.get('complexity_score', 0.5)
+        if complexity > 0.8:
+            seed_parts.append("问题具有较高的技术复杂度，需要深入分析多个技术层面，并综合考虑系统性的解决方案。")
+        elif complexity > 0.5:
+            seed_parts.append("这是一个中等复杂度的问题，需要结合理论知识和实践经验来制定合理的解决方案。")
+        else:
+            seed_parts.append("从技术角度看，这个问题有比较清晰的解决路径，可以采用标准的方法来处理。")
+        
+        # 关键因素（如果有）
+        key_factors = analysis.get('key_factors', [])
+        if key_factors:
+            factors_text = "、".join(key_factors[:3])
+            seed_parts.append(f"关键需要关注的技术点包括：{factors_text}。")
+        
+        # 置信度和建议
+        confidence = analysis.get('confidence_score', 0.5)
+        if confidence > 0.8:
+            seed_parts.append("基于问题的清晰度和常见性，我们有较高把握找到有效的解决方案。")
+        elif confidence > 0.5:
+            seed_parts.append("需要进一步明确具体需求和技术约束，以便提供更精准的解决方案。")
+        else:
+            seed_parts.append("建议先澄清问题的具体场景和技术背景，这有助于制定更有针对性的解决策略。")
+        
+        # 多步骤建议
+        if analysis.get('requires_multi_step'):
+            seed_parts.append("这个任务需要分步骤来实施，建议采用渐进式的方法逐一验证每个环节。")
+        
+        # 执行上下文考虑
+        if execution_context:
+            if execution_context.get('real_time_requirements'):
+                seed_parts.append("特别需要注意实时性能的要求。")
+            if execution_context.get('performance_critical'):
+                seed_parts.append("性能优化应该作为设计的核心考虑因素。")
+        
+        return " ".join(seed_parts)
+    
+    def _generate_emergency_fallback_seed(self, user_query: str) -> str:
+        """
+        紧急回退种子生成（最简单但可用）
+        
+        当所有其他方法都失败时使用此方法，确保系统始终能返回可用的种子。
+        
+        Args:
+            user_query: 用户查询
+            
+        Returns:
+            基础但可用的思维种子
+        """
+        return (
+            f"针对问题'{user_query}'，需要进行系统性的分析。"
+            f"建议首先明确问题的核心需求和技术背景，"
+            f"然后探索可行的技术方案并评估其优劣，"
+            f"最后制定具体的实施步骤并进行验证。"
+        )
+    
+    def generate_thinking_seed(self, user_query: str, execution_context: Optional[Dict] = None,
+                              enable_streaming: bool = False) -> Dict[str, Any]:
+        """
+        生成思维种子 - NeogenesisPlanner兼容接口（支持流式）
         
         这个方法是为了兼容NeogenesisPlanner中的调用，将get_thinking_seed的结果
         包装成期望的字典格式。
@@ -1078,6 +1365,7 @@ class PriorReasoner:
         Args:
             user_query: 用户查询
             execution_context: 执行上下文
+            enable_streaming: 是否启用流式输出
             
         Returns:
             Dict: 包含thinking_seed、reasoning、confidence的字典
@@ -1085,8 +1373,8 @@ class PriorReasoner:
         try:
             logger.info(f"🧠 生成思维种子 (兼容接口): {user_query[:30]}...")
             
-            # 调用核心的get_thinking_seed方法
-            thinking_seed = self.get_thinking_seed(user_query, execution_context)
+            # 调用核心的get_thinking_seed方法（传递流式参数）
+            thinking_seed = self.get_thinking_seed(user_query, execution_context, enable_streaming)
             
             # 获取分析信息
             analysis = self.get_quick_analysis_summary(user_query, execution_context)
