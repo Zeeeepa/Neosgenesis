@@ -2189,8 +2189,8 @@ class ContextualMABConverger:
             if strategy_id in self.path_arms:
                 arm = self.path_arms[strategy_id]
                 # 保留基本结构，但重置统计
-                arm.successes = 0
-                arm.failures = 0
+                arm.success_count = 0
+                arm.failure_count = 0
                 arm.total_reward = 0.0
                 arm.recent_results = []
                 arm.activation_count = 0
@@ -2319,127 +2319,276 @@ class ContextualMABConverger:
         
         return revocation_result
     
+    def _calculate_path_similarity(self, path1_type: str, path2_type: str) -> float:
+        """
+        计算两个路径类型之间的相似度
+        
+        Args:
+            path1_type: 第一个路径类型
+            path2_type: 第二个路径类型
+            
+        Returns:
+            相似度分数 (0.0-1.0)，1.0表示完全相似
+        """
+        # 相似度矩阵：定义不同路径类型之间的相似程度
+        similarity_matrix = {
+            # 系统分析型相似度
+            ("系统分析型", "整体综合型"): 0.8,
+            ("系统分析型", "探索调研型"): 0.6,
+            ("系统分析型", "批判质疑型"): 0.5,
+            
+            # 创新突破型相似度
+            ("创新突破型", "适应灵活型"): 0.7,
+            ("创新突破型", "探索调研型"): 0.6,
+            
+            # 批判质疑型相似度
+            ("批判质疑型", "探索调研型"): 0.5,
+            ("批判质疑型", "系统分析型"): 0.5,
+            
+            # 实用务实型相似度
+            ("实用务实型", "适应灵活型"): 0.6,
+            ("实用务实型", "系统分析型"): 0.4,
+            
+            # 整体综合型相似度
+            ("整体综合型", "协作咨询型"): 0.7,
+            ("整体综合型", "系统分析型"): 0.8,
+            
+            # 探索调研型相似度
+            ("探索调研型", "批判质疑型"): 0.5,
+            ("探索调研型", "创新突破型"): 0.6,
+            
+            # 协作咨询型相似度
+            ("协作咨询型", "整体综合型"): 0.7,
+            ("协作咨询型", "适应灵活型"): 0.5,
+            
+            # 适应灵活型相似度
+            ("适应灵活型", "创新突破型"): 0.7,
+            ("适应灵活型", "实用务实型"): 0.6,
+        }
+        
+        # 相同类型完全相似
+        if path1_type == path2_type:
+            return 1.0
+        
+        # 查找相似度（支持双向查找）
+        key1 = (path1_type, path2_type)
+        key2 = (path2_type, path1_type)
+        
+        similarity = similarity_matrix.get(key1) or similarity_matrix.get(key2)
+        
+        # 如果没有定义相似度，默认为低相似
+        return similarity if similarity is not None else 0.3
+    
+    def select_top_k_paths(self, paths: List[ReasoningPath], k: int = 2, 
+                          algorithm: str = 'auto',
+                          diversity_threshold: float = 0.7) -> List[ReasoningPath]:
+        """
+        🎯 新方案三核心方法：选择Top-K条优质且多样化的路径（分层输出策略）
+        
+        此方法支持分层输出架构：
+        - 选择k条最优路径
+        - 确保路径之间具有足够的多样性
+        - 支持黄金模板优先机制
+        
+        Args:
+            paths: 候选思维路径列表
+            k: 需要选择的路径数量（默认2条：主路径+补充路径）
+            algorithm: MAB算法类型 ('thompson_sampling', 'ucb_variant', 'epsilon_greedy', 'auto')
+            diversity_threshold: 多样性阈值，相似度超过此值的路径会被过滤 (0.0-1.0)
+            
+        Returns:
+            选择的k条优质路径列表，按置信度降序排列
+            - 第一条：主路径（最优）
+            - 其余：补充路径（按质量排序）
+        """
+        if not paths:
+            raise ValueError("路径列表不能为空")
+        
+        # 如果请求的路径数量大于等于候选路径数量，返回所有路径
+        if k >= len(paths):
+            logger.info(f"🎯 请求{k}条路径，但只有{len(paths)}条候选，返回所有路径")
+            return paths
+        
+        self.total_path_selections += 1
+        logger.info(f"🎯 开始分层路径选择（第{self.total_path_selections}次）")
+        logger.info(f"   目标: 选择{k}条多样化优质路径")
+        logger.info(f"   候选路径: {len(paths)}条")
+        logger.info(f"   多样性阈值: {diversity_threshold}")
+        
+        # 🏆 黄金模板优先检查
+        golden_match = self._check_golden_template_match(paths)
+        selected_paths = []
+        
+        if golden_match:
+            # 黄金模板路径直接作为主路径
+            golden_path = golden_match['path']
+            template_id = golden_match['template_id']
+            
+            selected_paths.append(golden_path)
+            
+            # 更新黄金模板统计
+            self.template_usage_stats[template_id] += 1
+            self.template_match_history.append({
+                'template_id': template_id,
+                'path_id': golden_path.path_id,
+                'path_type': golden_path.path_type,
+                'match_score': golden_match['match_score'],
+                'timestamp': time.time(),
+                'selection_round': self.total_path_selections
+            })
+            
+            logger.info(f"🏆 黄金模板作为主路径: {golden_path.path_type}")
+            
+            # 从候选中移除黄金路径，继续选择补充路径
+            remaining_paths = [p for p in paths if p.path_id != golden_path.path_id]
+        else:
+            remaining_paths = paths
+        
+        # 🔧 准备MAB决策臂和路径评分
+        path_scores = []  # (score, path, arm)
+        strategy_to_path_mapping = {}
+        
+        for path in remaining_paths:
+            strategy_id = path.strategy_id
+            strategy_to_path_mapping[strategy_id] = path
+            
+            # 创建或获取决策臂
+            arm = self._create_strategy_arm_if_missing(strategy_id, path.path_type)
+            
+            # 使用MAB算法计算路径评分
+            if algorithm == 'auto':
+                algorithm = self._select_best_algorithm_for_paths()
+            
+            try:
+                # 计算路径得分（使用各自的MAB算法）
+                if algorithm == 'thompson_sampling':
+                    score = self._calculate_thompson_score(arm)
+                elif algorithm == 'ucb_variant':
+                    score = self._calculate_ucb_score(arm)
+                elif algorithm == 'epsilon_greedy':
+                    score = self._calculate_epsilon_greedy_score(arm)
+                else:
+                    score = self._calculate_thompson_score(arm)
+                
+                path_scores.append((score, path, arm))
+                
+            except Exception as e:
+                logger.warning(f"⚠️ 计算路径 {path.path_type} 评分失败: {e}")
+                # 使用默认分数
+                path_scores.append((0.5, path, arm))
+        
+        # 按分数降序排序
+        path_scores.sort(reverse=True, key=lambda x: x[0])
+        
+        logger.info(f"📊 路径评分完成，排序结果:")
+        for i, (score, path, _) in enumerate(path_scores[:5], 1):  # 只显示前5名
+            logger.info(f"   {i}. {path.path_type}: {score:.3f}")
+        
+        # 🎨 多样性过滤：选择多样化的Top-K路径
+        for score, path, arm in path_scores:
+            if len(selected_paths) >= k:
+                break
+            
+            # 检查与已选路径的相似度
+            is_diverse = True
+            for selected_path in selected_paths:
+                similarity = self._calculate_path_similarity(
+                    path.path_type, 
+                    selected_path.path_type
+                )
+                
+                if similarity >= diversity_threshold:
+                    is_diverse = False
+                    logger.debug(f"   🔄 路径 {path.path_type} 与 {selected_path.path_type} 相似度过高({similarity:.2f})，跳过")
+                    break
+            
+            if is_diverse or len(selected_paths) == 0:
+                selected_paths.append(path)
+                
+                # 更新决策臂统计
+                arm.last_used = time.time()
+                arm.activation_count += 1
+                self._update_exploration_boost(arm.path_id)
+                
+                logger.info(f"✅ 选中路径 {len(selected_paths)}/{k}: {path.path_type} (评分: {score:.3f})")
+        
+        # 如果多样性过滤后路径不足k条，补充分数较高的路径
+        if len(selected_paths) < k:
+            logger.info(f"⚠️ 多样性过滤后仅{len(selected_paths)}条路径，放宽标准补充路径")
+            for score, path, arm in path_scores:
+                if len(selected_paths) >= k:
+                    break
+                if path not in selected_paths:
+                    selected_paths.append(path)
+                    arm.last_used = time.time()
+                    arm.activation_count += 1
+                    logger.info(f"   补充路径: {path.path_type} (评分: {score:.3f})")
+        
+        # 记录选择历史
+        for i, path in enumerate(selected_paths):
+            self.path_selection_history.append({
+                'path_id': path.strategy_id,
+                'path_type': path.path_type,
+                'algorithm': algorithm,
+                'rank': i + 1,  # 1=主路径, 2+=补充路径
+                'is_primary': (i == 0),
+                'timestamp': time.time(),
+                'selection_round': self.total_path_selections
+            })
+        
+        logger.info(f"🎯 分层路径选择完成:")
+        logger.info(f"   主路径: {selected_paths[0].path_type}")
+        if len(selected_paths) > 1:
+            supplementary_types = [p.path_type for p in selected_paths[1:]]
+            logger.info(f"   补充路径: {', '.join(supplementary_types)}")
+        
+        return selected_paths
+    
+    def _calculate_thompson_score(self, arm) -> float:
+        """计算Thompson采样得分"""
+        alpha = arm.success_count + 1
+        beta = arm.failure_count + 1
+        return np.random.beta(alpha, beta)
+    
+    def _calculate_ucb_score(self, arm) -> float:
+        """计算UCB得分"""
+        if arm.trials == 0:
+            return float('inf')
+        
+        mean_reward = arm.total_reward / arm.trials
+        exploration_bonus = np.sqrt(2 * np.log(self.total_path_selections) / arm.trials)
+        return mean_reward + exploration_bonus
+    
+    def _calculate_epsilon_greedy_score(self, arm) -> float:
+        """计算ε-贪心得分"""
+        if arm.trials == 0:
+            return np.random.random()
+        
+        epsilon = max(0.1, 1.0 / np.sqrt(self.total_path_selections))
+        if np.random.random() < epsilon:
+            return np.random.random()
+        else:
+            return arm.total_reward / arm.trials
+    
     def select_best_path(self, paths: List[ReasoningPath], algorithm: str = 'auto') -> ReasoningPath:
         """
-        阶段三核心方法：从思维路径列表中选择最优路径（集成黄金模板系统）
+        🔄 向后兼容方法：选择单一最优路径
+        
+        ⚠️ 已弃用：此方法保留仅用于向后兼容
+        推荐使用: select_top_k_paths() 方法以获得分层输出能力
         
         Args:
             paths: 思维路径列表
             algorithm: 使用的算法 ('thompson_sampling', 'ucb_variant', 'epsilon_greedy', 'auto')
             
         Returns:
-            选择的最优思维路径
+            选择的最优思维路径（仅返回第一条）
         """
-        if not paths:
-            raise ValueError("路径列表不能为空")
+        logger.debug("⚠️ 调用已弃用的 select_best_path 方法，建议使用 select_top_k_paths")
         
-        if len(paths) == 1:
-            logger.info(f"🎯 只有一个路径，直接选择: {paths[0].path_type}")
-            return paths[0]
-        
-        self.total_path_selections += 1
-        logger.info(f"🛤️ 开始第 {self.total_path_selections} 次路径选择，候选路径: {len(paths)}个")
-        
-        # 🏆 黄金模板优先检查：在MAB算法前先检查是否有匹配的黄金模板
-        golden_match = self._check_golden_template_match(paths)
-        if golden_match:
-            selected_path = golden_match['path']
-            template_id = golden_match['template_id']
-            match_score = golden_match['match_score']
-            
-            # 更新黄金模板使用统计
-            self.template_usage_stats[template_id] += 1
-            
-            # 记录模板匹配历史
-            self.template_match_history.append({
-                'template_id': template_id,
-                'path_id': selected_path.path_id,
-                'path_type': selected_path.path_type,
-                'match_score': match_score,
-                'timestamp': time.time(),
-                'selection_round': self.total_path_selections
-            })
-            
-            logger.info(f"🏆 黄金模板匹配成功！")
-            logger.info(f"   模板ID: {template_id}")
-            logger.info(f"   匹配路径: {selected_path.path_type}")
-            logger.info(f"   匹配分数: {match_score:.3f}")
-            logger.info(f"   跳过MAB算法，直接使用黄金模板")
-            
-            return selected_path
-        
-        # 🔧 动态创建策略：在选择路径时确保所有策略决策臂都存在
-        available_arms = []
-        strategy_to_path_mapping = {}  # 策略ID到路径实例的映射
-        
-        for path in paths:
-            strategy_id = path.strategy_id
-            strategy_to_path_mapping[strategy_id] = path  # 记录映射关系
-            
-            # 🔧 动态创建：确保策略决策臂存在
-            arm = self._create_strategy_arm_if_missing(strategy_id, path.path_type)
-            available_arms.append(arm)
-            
-            logger.debug(f"✅ 策略决策臂就绪: {strategy_id} ({path.path_type})")
-            logger.debug(f"   对应实例: {path.instance_id}")
-        
-        # 自动选择算法
-        if algorithm == 'auto':
-            algorithm = self._select_best_algorithm_for_paths()
-        
-        # 根据选择的算法进行决策
-        try:
-            if algorithm == 'thompson_sampling':
-                best_arm = self._thompson_sampling_for_paths(available_arms)
-            elif algorithm == 'ucb_variant':
-                best_arm = self._ucb_variant_for_paths(available_arms)
-            elif algorithm == 'epsilon_greedy':
-                best_arm = self._epsilon_greedy_for_paths(available_arms)
-            else:
-                logger.warning(f"⚠️ 未知算法 {algorithm}，使用Thompson采样")
-                best_arm = self._thompson_sampling_for_paths(available_arms)
-            
-            # 更新使用时间和激活次数
-            best_arm.last_used = time.time()
-            best_arm.activation_count += 1
-            
-            # 🎭 试炼场更新：更新探索增强状态
-            self._update_exploration_boost(best_arm.path_id)
-            
-            # 🎯 修复：基于策略ID找到对应的路径实例
-            selected_path = strategy_to_path_mapping.get(best_arm.path_id)
-            
-            if selected_path is None:
-                # 兼容性：如果映射失败，尝试其他方式
-                logger.warning(f"⚠️ 策略映射失败: {best_arm.path_id}")
-                for path in paths:
-                    strategy_id = getattr(path, 'strategy_id', None)
-                    if strategy_id == best_arm.path_id:
-                        selected_path = path
-                        break
-                
-                if selected_path is None:
-                    logger.error(f"❌ 无法找到对应的路径策略: {best_arm.path_id}")
-                    selected_path = paths[0]  # 回退到第一个路径
-            
-            # 记录选择历史
-            self.path_selection_history.append({
-                'path_id': best_arm.path_id,
-                'path_type': selected_path.path_type,
-                'algorithm': algorithm,
-                'timestamp': time.time(),
-                'selection_round': self.total_path_selections
-            })
-            
-            logger.info(f"🎯 使用 {algorithm} 选择路径: {selected_path.path_type} (ID: {best_arm.path_id})")
-            return selected_path
-            
-        except Exception as e:
-            logger.error(f"❌ MAB路径选择算法执行失败: {e}")
-            # 回退到随机选择
-            selected_path = np.random.choice(paths)
-            logger.info(f"🔄 回退到随机选择路径: {selected_path.path_type}")
-            return selected_path
+        # 调用新的分层选择方法，只返回第一条（主路径）
+        selected_paths = self.select_top_k_paths(paths, k=1, algorithm=algorithm)
+        return selected_paths[0]
     
     def select_best_tool(self, available_tools: List[str], algorithm: str = 'auto') -> str:
         """
@@ -3809,7 +3958,7 @@ class ContextualMABConverger:
     
     def _promote_to_golden_template(self, strategy_id: str, arm: EnhancedDecisionArm):
         """
-        将策略提升为黄金模板 - 修复版：基于策略ID
+        将策略提升为黄金模板 - 🎯 修复版：基于策略ID
         
         Args:
             strategy_id: 策略ID（而非实例ID）
@@ -3820,7 +3969,7 @@ class ContextualMABConverger:
             # 移除表现最差的模板
             self._remove_worst_golden_template()
         
-        # 修复：基于策略ID创建黄金模板
+        # 🎯 修复：基于策略ID创建黄金模板
         template_data = {
             'strategy_id': strategy_id,        # 策略ID（用于匹配）
             'path_id': strategy_id,           # 兼容性字段
@@ -3839,18 +3988,18 @@ class ContextualMABConverger:
         # 使用策略ID作为模板键
         self.golden_templates[strategy_id] = template_data
         
-        logger.info(f"新黄金模板诞生！")
-        logger.info(f"策略ID: {strategy_id}")
-        logger.info(f"路径类型: {arm.option}")
-        logger.info(f"成功率: {arm.success_rate:.1%}")
-        logger.info(f"激活次数: {arm.activation_count}")
+        logger.info(f"🏆 新黄金模板诞生！")
+        logger.info(f"   策略ID: {strategy_id}")
+        logger.info(f"   路径类型: {arm.option}")
+        logger.info(f"   成功率: {arm.success_rate:.1%}")
+        logger.info(f"   激活次数: {arm.activation_count}")
         avg_rl_reward = sum(arm.rl_reward_history) / len(arm.rl_reward_history) if arm.rl_reward_history else 0.0
-        logger.info(f"平均奖励: {avg_rl_reward:.3f}")
-        logger.info(f"当前黄金模板总数: {len(self.golden_templates)}")
+        logger.info(f"   平均奖励: {avg_rl_reward:.3f}")
+        logger.info(f"   当前黄金模板总数: {len(self.golden_templates)}")
     
     def _update_golden_template(self, strategy_id: str, arm: EnhancedDecisionArm):
         """
-        更新已有的黄金模板数据 - 修复版：基于策略ID
+        更新已有的黄金模板数据 - 🎯 修复版：基于策略ID
         
         Args:
             strategy_id: 策略ID（而非实例ID）
@@ -3866,7 +4015,7 @@ class ContextualMABConverger:
                 'stability_score': self._calculate_stability_score(arm)
             })
             
-            logger.debug(f"更新黄金模板: {strategy_id} -> 成功率:{arm.success_rate:.1%}")
+            logger.debug(f"🏆 更新黄金模板: {strategy_id} -> 成功率:{arm.success_rate:.1%}")
     
     def _calculate_stability_score(self, arm: EnhancedDecisionArm) -> float:
         """
@@ -3918,9 +4067,9 @@ class ContextualMABConverger:
         
         removed_template = self.golden_templates.pop(worst_template_id)
         
-        logger.info(f"移除表现较差的黄金模板: {worst_template_id}")
-        logger.info(f"原因: 为新模板腾出空间")
-        logger.info(f"被移除模板成功率: {removed_template['success_rate']:.1%}")
+        logger.info(f"🗑️ 移除表现较差的黄金模板: {worst_template_id}")
+        logger.info(f"   原因: 为新模板腾出空间")
+        logger.info(f"   被移除模板成功率: {removed_template['success_rate']:.1%}")
     
     def _calculate_template_quality_score(self, template_data: Dict[str, any]) -> float:
         """
@@ -3964,7 +4113,7 @@ class ContextualMABConverger:
         else:
             return 0.0
     
-    # ==================== 黄金模板管理接口 ====================
+    # ==================== 🏆 黄金模板管理接口 ====================
     
     def get_golden_templates(self) -> Dict[str, Dict[str, any]]:
         """
@@ -4027,7 +4176,7 @@ class ContextualMABConverger:
             logger.info(f"   模板类型: {removed_template['path_type']}")
             return True
         else:
-            logger.warning(f"黄金模板 {template_id} 不存在")
+            logger.warning(f"⚠️ 黄金模板 {template_id} 不存在")
             return False
     
     def clear_golden_templates(self):
@@ -4039,7 +4188,7 @@ class ContextualMABConverger:
         self.template_usage_stats.clear()
         self.template_match_history.clear()
         
-        logger.info(f"已清空所有黄金模板 (共 {count} 个)")
+        logger.info(f"🗑️ 已清空所有黄金模板 (共 {count} 个)")
     
     def export_golden_templates(self) -> str:
         """
@@ -4100,7 +4249,7 @@ class ContextualMABConverger:
             logger.error(f"❌ 导入黄金模板失败: {e}")
             return False
     
-    # ==================== 黄金模板使用示例 ====================
+    # ==================== 🏆 黄金模板使用示例 ====================
     
     def demo_golden_template_workflow(self):
         """
@@ -4108,7 +4257,7 @@ class ContextualMABConverger:
         
         这是一个示例方法，展示了黄金模板系统的核心功能
         """
-        logger.info("开始黄金模板系统演示")
+        logger.info("🏆 开始黄金模板系统演示")
         
         # 1. 显示当前状态
         stats = self.get_golden_template_stats()
@@ -4123,13 +4272,13 @@ class ContextualMABConverger:
         
         # 3. 显示现有黄金模板
         if self.golden_templates:
-            logger.info("现有黄金模板:")
+            logger.info("🏆 现有黄金模板:")
             for template_id, template_data in self.golden_templates.items():
                 logger.info(f"  - {template_id}: {template_data['path_type']} "
                            f"(成功率: {template_data['success_rate']:.1%}, "
                            f"使用次数: {self.template_usage_stats.get(template_id, 0)})")
         else:
-            logger.info("暂无黄金模板")
+            logger.info("📝 暂无黄金模板")
         
         # 4. 显示候选路径
         candidate_paths = []
@@ -4138,7 +4287,7 @@ class ContextualMABConverger:
                 candidate_paths.append((path_id, arm))
         
         if candidate_paths:
-            logger.info("符合黄金模板条件的候选路径:")
+            logger.info("⭐ 符合黄金模板条件的候选路径:")
             for path_id, arm in candidate_paths:
                 stability = self._calculate_stability_score(arm)
                 logger.info(f"  - {path_id}: {arm.option} "
@@ -4146,11 +4295,11 @@ class ContextualMABConverger:
                            f"样本: {arm.activation_count}, "
                            f"稳定性: {stability:.2f})")
         else:
-            logger.info("暂无符合条件的候选路径")
+            logger.info("📝 暂无符合条件的候选路径")
         
-        logger.info("黄金模板系统演示完成")
+        logger.info("🏆 黄金模板系统演示完成")
     
-    # ==================== Aha-Moment决策支持系统 ====================
+    # ==================== 💡 Aha-Moment决策支持系统 ====================
     
     def get_path_confidence(self, strategy_id: str) -> float:
         """
@@ -4357,7 +4506,7 @@ class ContextualMABConverger:
         
         return consecutive_count
     
-    # ==================== 根源修复完成：移除复杂解析逻辑 ====================
+    # ==================== 🎯 根源修复完成：移除复杂解析逻辑 ====================
     # 注意：_resolve_strategy_id 方法已移除，因为数据源头现在直接提供正确的策略ID
     
     def _infer_path_type_from_strategy_id(self, strategy_id: str) -> str:
@@ -4400,7 +4549,7 @@ class ContextualMABConverger:
         strategy_lower = strategy_id.lower()
         for key, value in strategy_to_type_mapping.items():
             if key.lower() in strategy_lower or strategy_lower in key.lower():
-                logger.debug(f"模糊匹配策略类型: {strategy_id} -> {value}")
+                logger.debug(f"🔍 模糊匹配策略类型: {strategy_id} -> {value}")
                 return value
         
         # 基于关键词推断
@@ -4422,11 +4571,11 @@ class ContextualMABConverger:
             return '适应灵活型'
         
         # 默认返回
-        logger.debug(f"无法推断路径类型，使用默认: {strategy_id} -> 通用方法型")
+        logger.debug(f"⚠️ 无法推断路径类型，使用默认: {strategy_id} -> 通用方法型")
         return '通用方法型'
 
 
-# 向后兼容性：保持原有的MABConverger类名
+# 🔄 向后兼容性：保持原有的MABConverger类名
 MABConverger = ContextualMABConverger
 
 # 为了完全向后兼容，我们也可以创建一个简单的工厂函数
